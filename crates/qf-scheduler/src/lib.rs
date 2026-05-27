@@ -8,3 +8,6 @@
 
 pub mod predictor;
 pub mod scheduler;
+
+pub use predictor::HoltWintersPredictor;
+pub use scheduler::{Priority, ScheduledTask, Scheduler};

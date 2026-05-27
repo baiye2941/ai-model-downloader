@@ -7,3 +7,5 @@
 
 pub mod capture;
 pub mod filter;
+
+pub use capture::{CaptureConfig, ResourceType, identify_resource, should_capture};
