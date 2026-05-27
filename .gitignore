@@ -1,0 +1,26 @@
+# 构建产物
+target/
+
+# 前端
+node_modules/
+frontend/dist/
+frontend/.svelte-kit/
+
+# 参考文档（大文件，不跟踪）
+docx/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# 环境变量
+.env
+.env.local
