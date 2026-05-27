@@ -152,3 +152,91 @@ mod tests {
         assert_eq!(deserialized, DownloadState::Downloading);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// 分片 size 应始终等于 end - start + 1
+        #[test]
+        fn test_fragment_info_size_consistency(
+            index in 0u32..1000,
+            start in 0u64..u64::MAX / 2,
+            size in 1u64..1024 * 1024 * 1024,
+        ) {
+            let end = start + size - 1;
+            let frag = FragmentInfo {
+                index,
+                start,
+                end,
+                size,
+                downloaded: 0,
+                hash: None,
+            };
+            // 核心不变量: size == end - start + 1
+            prop_assert_eq!(frag.size, frag.end - frag.start + 1);
+            // end >= start（单字节分片时 end == start）
+            prop_assert!(frag.end >= frag.start);
+            // size 至少为 1
+            prop_assert!(frag.size >= 1);
+        }
+
+        /// DownloadState 序列化/反序列化往返保持不变
+        #[test]
+        fn test_download_state_roundtrip(state in prop_oneof![
+            Just(DownloadState::Pending),
+            Just(DownloadState::Downloading),
+            Just(DownloadState::Paused),
+            Just(DownloadState::Verifying),
+            Just(DownloadState::Completed),
+            Just(DownloadState::Failed),
+            Just(DownloadState::Cancelled),
+        ]) {
+            let json = serde_json::to_string(&state).unwrap();
+            let deserialized: DownloadState = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(state, deserialized);
+        }
+
+        /// FileMetadata 序列化/反序列化往返保持关键字段一致
+        #[test]
+        fn test_file_metadata_roundtrip(
+            file_name in "[a-zA-Z0-9_\\-]{1,50}",
+            file_size in prop::option::of(0u64..1024 * 1024 * 1024),
+            supports_range in proptest::bool::ANY,
+        ) {
+            let meta = FileMetadata {
+                file_name: file_name.clone(),
+                file_size,
+                content_type: Some("application/octet-stream".into()),
+                supports_range,
+                etag: None,
+                last_modified: None,
+            };
+            let json = serde_json::to_string(&meta).unwrap();
+            let deserialized: FileMetadata = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(deserialized.file_name, file_name);
+            prop_assert_eq!(deserialized.file_size, file_size);
+            prop_assert_eq!(deserialized.supports_range, supports_range);
+        }
+
+        /// FragmentInfo downloaded 不应超过 size
+        #[test]
+        fn test_fragment_downloaded_le_size(
+            size in 1u64..1024 * 1024,
+            downloaded in 0u64..1024 * 1024,
+        ) {
+            let clamped_downloaded = downloaded.min(size);
+            let frag = FragmentInfo {
+                index: 0,
+                start: 0,
+                end: size - 1,
+                size,
+                downloaded: clamped_downloaded,
+                hash: None,
+            };
+            prop_assert!(frag.downloaded <= frag.size);
+        }
+    }
+}

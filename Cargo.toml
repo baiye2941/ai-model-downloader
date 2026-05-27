@@ -78,12 +78,41 @@ rstest = "0.22"
 tempfile = "3"
 tokio-test = "0.4"
 
+[package]
+name = "quantum-fetch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QuantumFetch 基准测试与集成测试入口"
+
+[dev-dependencies]
+criterion = { workspace = true }
+qf-core = { path = "crates/qf-core", features = ["test-harness"] }
+qf-io = { path = "crates/qf-io" }
+qf-engine = { path = "crates/qf-engine" }
+qf-crypto = { path = "crates/qf-crypto" }
+qf-scheduler = { path = "crates/qf-scheduler" }
+blake3 = { workspace = true }
+sha2 = { workspace = true }
+bytes = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+
+[[bench]]
+name = "buffer_pool"
+harness = false
+
+[[bench]]
+name = "crypto_hash"
+harness = false
+
+[[bench]]
+name = "fragment_planning"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-
-[profile.bench]
-inherits = "release"
-debug = true

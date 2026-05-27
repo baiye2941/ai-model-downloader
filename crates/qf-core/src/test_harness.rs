@@ -2,7 +2,7 @@
 //!
 //! 提供 TestHarness 结构体,封装 mock 依赖和 fixture
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-harness"))]
 pub mod harness {
     use bytes::Bytes;
     use std::collections::HashMap;

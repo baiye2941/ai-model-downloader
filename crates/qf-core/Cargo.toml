@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "QuantumFetch 核心类型、trait 定义与错误体系"
 
+[features]
+test-harness = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

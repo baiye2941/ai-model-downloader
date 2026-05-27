@@ -8,6 +8,8 @@
 
 pub mod connection;
 pub mod fragment;
+pub mod orchestrator;
 
 pub use connection::{ConnectionPool, PoolConfig};
 pub use fragment::{BandwidthTracker, FragmentRecord, FragmentState};
+pub use orchestrator::DownloadOrchestrator;

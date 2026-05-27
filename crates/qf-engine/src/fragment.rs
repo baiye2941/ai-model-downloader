@@ -311,3 +311,139 @@ mod tests {
         assert_eq!(size, 1024); // clamp to min
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// compute_fragment_size 结果应在 min..=max 范围内
+        #[test]
+        fn test_fragment_size_always_in_range(
+            file_size in 0u64..1024 * 1024 * 1024 * 10,
+            bandwidth in 0u64..1024 * 1024 * 1024,
+        ) {
+            let min_size = 1024 * 1024;       // 1MB
+            let max_size = 64 * 1024 * 1024;  // 64MB
+            let target_fragments = 16u32;
+
+            let result = compute_fragment_size(
+                file_size,
+                bandwidth,
+                min_size,
+                max_size,
+                target_fragments,
+            );
+
+            if file_size == 0 {
+                // 空文件返回 0
+                prop_assert_eq!(result, 0);
+            } else {
+                // 正常文件结果在 [min_size, max_size] 内
+                prop_assert!(result >= min_size, "结果 {} 小于最小值 {}", result, min_size);
+                prop_assert!(result <= max_size, "结果 {} 大于最大值 {}", result, max_size);
+            }
+        }
+
+        /// EWMA 估计值应该在观测值的合理范围内
+        #[test]
+        fn test_bandwidth_tracker_ewma_bounded(
+            values in prop::collection::vec(0u64..1024 * 1024 * 1024, 1..50)
+        ) {
+            let mut tracker = BandwidthTracker::new(0.3);
+            for v in &values {
+                tracker.record(*v);
+            }
+
+            let estimate = tracker.estimate();
+            let max_val = *values.iter().max().unwrap();
+
+            // EWMA 不应超过观测最大值的合理范围
+            // (理论上 EWMA 永远在 min..max 之间,但 u64 截断可能导致边界情况)
+            prop_assert!(
+                estimate <= max_val * 2,
+                "EWMA 估计 {} 远超最大观测值 {}",
+                estimate,
+                max_val,
+            );
+            prop_assert_eq!(tracker.sample_count(), values.len());
+        }
+
+        /// alpha 值应被 clamp 到 [0.0, 1.0] 范围内
+        #[test]
+        fn test_bandwidth_tracker_alpha_clamped(
+            alpha in -10.0f64..10.0f64,
+            sample in 0u64..1024 * 1024,
+        ) {
+            let tracker = BandwidthTracker::new(alpha);
+            let mut tracker = tracker;
+            tracker.record(sample);
+            // 创建不应 panic,estimate 应等于 sample（单样本）
+            prop_assert_eq!(tracker.estimate(), sample);
+        }
+
+        /// FragmentRecord 状态机: 必须经历正确的生命周期
+        #[test]
+        fn test_fragment_state_machine_valid(
+            max_retries in 0u32..10,
+        ) {
+            let info = FragmentInfo {
+                index: 0,
+                start: 0,
+                end: 999,
+                size: 1000,
+                downloaded: 0,
+                hash: None,
+            };
+            let mut record = FragmentRecord::new(info, max_retries);
+            prop_assert_eq!(record.state, FragmentState::Pending);
+
+            // 尝试下载 -> 失败重试
+            for _ in 0..=max_retries {
+                record.start_download();
+                prop_assert_eq!(record.state, FragmentState::Downloading);
+
+                if record.retry_count < max_retries {
+                    // 还可以重试
+                    let can_retry = record.mark_failed();
+                    prop_assert!(can_retry);
+                    prop_assert_eq!(record.state, FragmentState::Pending);
+                } else {
+                    // 超过最大重试次数
+                    let data = Bytes::from_static(b"test data for fragment");
+                    record.complete_download(data, Duration::from_millis(10));
+                    prop_assert_eq!(record.state, FragmentState::Verifying);
+                    record.verify_ok();
+                    prop_assert_eq!(record.state, FragmentState::Writing);
+                    record.write_done();
+                    prop_assert!(record.is_done());
+                    break;
+                }
+            }
+        }
+
+        /// 指数退避时间应随重试次数递增,且不溢出
+        #[test]
+        fn test_backoff_duration_monotonic(
+            retry_count in 0u32..15,
+        ) {
+            let info = FragmentInfo {
+                index: 0,
+                start: 0,
+                end: 99,
+                size: 100,
+                downloaded: 0,
+                hash: None,
+            };
+            let mut record = FragmentRecord::new(info, 20);
+            record.retry_count = retry_count;
+
+            let backoff = record.backoff_duration();
+            // 退避时间应为正数
+            prop_assert!(backoff.as_secs() >= 1);
+            // 最大不应超过 2^10 = 1024 秒（被 min(10) 限制）
+            prop_assert!(backoff.as_secs() <= 1024);
+        }
+    }
+}

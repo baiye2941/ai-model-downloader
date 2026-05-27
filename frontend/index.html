@@ -5,106 +5,559 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>QuantumFetch</title>
   <style>
+    :root {
+      --bg-primary: #08080c;
+      --bg-secondary: #0f0f17;
+      --bg-tertiary: #161622;
+      --bg-card: #1a1a2a;
+      --border: #252540;
+      --border-active: #6366f1;
+      --text-primary: #e8e8f0;
+      --text-secondary: #8888a0;
+      --text-muted: #555570;
+      --accent: #6366f1;
+      --accent-hover: #7577f5;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --error: #ef4444;
+      --radius: 10px;
+      --radius-sm: 6px;
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      background: #0a0a0f;
-      color: #e0e0e0;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
       min-height: 100vh;
       display: flex;
-      flex-direction: column;
+      overflow: hidden;
     }
-    .header {
-      padding: 16px 24px;
-      background: #12121a;
-      border-bottom: 1px solid #1e1e2e;
+
+    /* 侧边栏 */
+    .sidebar {
+      width: 220px;
+      background: var(--bg-secondary);
+      border-right: 1px solid var(--border);
       display: flex;
-      align-items: center;
-      justify-content: space-between;
+      flex-direction: column;
+      flex-shrink: 0;
     }
-    .logo {
-      font-size: 20px;
-      font-weight: 700;
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    .sidebar-logo {
+      padding: 20px;
+      font-size: 18px;
+      font-weight: 800;
+      background: linear-gradient(135deg, #6366f1, #a78bfa);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       letter-spacing: -0.5px;
+      border-bottom: 1px solid var(--border);
     }
-    .main {
-      flex: 1;
+    .sidebar-nav { padding: 12px 8px; flex: 1; }
+    .nav-item {
+      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 13px;
       display: flex;
       align-items: center;
-      justify-content: center;
-      flex-direction: column;
-      gap: 24px;
+      gap: 10px;
+      transition: all 0.15s;
+      user-select: none;
     }
-    .url-input {
-      width: 600px;
-      max-width: 90vw;
+    .nav-item:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+    .nav-item.active {
+      background: rgba(99, 102, 241, 0.12);
+      color: var(--accent);
+    }
+    .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+    .sidebar-stats {
+      padding: 16px;
+      border-top: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--text-muted);
+      line-height: 1.8;
+    }
+
+    /* 主区域 */
+    .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* 顶部栏 */
+    .topbar {
+      padding: 14px 24px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .url-bar {
+      flex: 1;
       display: flex;
       gap: 8px;
     }
-    .url-input input {
+    .url-bar input {
       flex: 1;
-      padding: 12px 16px;
-      background: #1a1a2e;
-      border: 1px solid #2a2a40;
-      border-radius: 8px;
-      color: #e0e0e0;
-      font-size: 14px;
+      padding: 10px 14px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-size: 13px;
       outline: none;
       transition: border-color 0.2s;
     }
-    .url-input input:focus {
-      border-color: #6366f1;
-    }
-    .url-input button {
-      padding: 12px 24px;
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    .url-bar input:focus { border-color: var(--border-active); }
+    .url-bar input::placeholder { color: var(--text-muted); }
+    .btn {
+      padding: 10px 20px;
       border: none;
-      border-radius: 8px;
-      color: white;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
       font-weight: 600;
       cursor: pointer;
-      font-size: 14px;
-      transition: opacity 0.2s;
+      transition: all 0.15s;
     }
-    .url-input button:hover { opacity: 0.9; }
-    .info {
-      color: #666;
-      font-size: 13px;
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+    }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+
+    /* 下载列表 */
+    .content { flex: 1; overflow-y: auto; padding: 16px 24px; }
+    .section-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+    }
+
+    /* 下载卡片 */
+    .download-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      margin-bottom: 10px;
+      transition: border-color 0.2s;
+    }
+    .download-card:hover { border-color: #353560; }
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .card-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card-name .ext {
+      font-size: 10px;
+      padding: 2px 6px;
+      background: rgba(99, 102, 241, 0.15);
+      color: var(--accent);
+      border-radius: 4px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .card-status {
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-weight: 500;
+    }
+    .status-downloading {
+      background: rgba(99, 102, 241, 0.12);
+      color: var(--accent);
+    }
+    .status-completed {
+      background: rgba(34, 197, 94, 0.12);
+      color: var(--success);
+    }
+    .status-paused {
+      background: rgba(245, 158, 11, 0.12);
+      color: var(--warning);
+    }
+    .status-failed {
+      background: rgba(239, 68, 68, 0.12);
+      color: var(--error);
+    }
+
+    /* 进度条 */
+    .progress-bar {
+      height: 4px;
+      background: var(--bg-tertiary);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-bottom: 10px;
+    }
+    .progress-fill {
+      height: 100%;
+      border-radius: 2px;
+      transition: width 0.3s ease;
+    }
+    .progress-fill.downloading { background: linear-gradient(90deg, #6366f1, #a78bfa); }
+    .progress-fill.completed { background: var(--success); }
+    .progress-fill.paused { background: var(--warning); }
+    .progress-fill.failed { background: var(--error); }
+
+    /* 卡片详情 */
+    .card-details {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+    .detail-item { display: flex; align-items: center; gap: 4px; }
+    .detail-label { color: var(--text-muted); }
+    .speed-value { color: var(--accent); font-weight: 600; }
+
+    /* 空状态 */
+    .empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      gap: 16px;
+    }
+    .empty-icon { font-size: 48px; opacity: 0.3; }
+    .empty-text { font-size: 14px; }
+    .empty-hint { font-size: 12px; color: var(--text-muted); }
+
+    /* 右侧详情面板 */
+    .detail-panel {
+      width: 280px;
+      background: var(--bg-secondary);
+      border-left: 1px solid var(--border);
+      padding: 20px;
+      flex-shrink: 0;
+      overflow-y: auto;
+    }
+    .panel-title { font-size: 14px; font-weight: 600; margin-bottom: 16px; }
+    .panel-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      font-size: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel-label { color: var(--text-muted); }
+    .panel-value { color: var(--text-primary); font-weight: 500; }
+
+    /* 分片进度 */
+    .fragment-grid {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 3px;
+      margin-top: 12px;
+    }
+    .fragment-block {
+      aspect-ratio: 1;
+      border-radius: 3px;
+      background: var(--bg-tertiary);
+      transition: background 0.3s;
+    }
+    .fragment-block.done { background: var(--success); }
+    .fragment-block.active { background: var(--accent); animation: pulse 1.5s infinite; }
+    .fragment-block.pending { background: var(--bg-tertiary); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
     }
   </style>
 </head>
 <body>
-  <div class="header">
-    <div class="logo">QuantumFetch</div>
-    <div class="info" id="app-info"></div>
-  </div>
-  <div class="main">
-    <div class="url-input">
-      <input type="text" id="url" placeholder="输入下载链接..." />
-      <button onclick="startDownload()">下载</button>
+  <!-- 侧边栏 -->
+  <div class="sidebar">
+    <div class="sidebar-logo">QuantumFetch</div>
+    <div class="sidebar-nav">
+      <div class="nav-item active" data-view="downloads">
+        <span class="nav-icon">&#9660;</span>
+        <span>下载列表</span>
+      </div>
+      <div class="nav-item" data-view="sniffer">
+        <span class="nav-icon">&#128065;</span>
+        <span>资源嗅探</span>
+      </div>
+      <div class="nav-item" data-view="settings">
+        <span class="nav-icon">&#9881;</span>
+        <span>设置</span>
+      </div>
     </div>
-    <div class="info">支持 HTTP/HTTPS/FTP/QUIC 协议,多线程分片下载</div>
+    <div class="sidebar-stats">
+      <div>活跃连接: <span id="stat-connections">0</span></div>
+      <div>总速度: <span id="stat-speed">0 B/s</span></div>
+      <div>队列任务: <span id="stat-queue">0</span></div>
+    </div>
   </div>
+
+  <!-- 主区域 -->
+  <div class="main">
+    <!-- 顶部栏 -->
+    <div class="topbar">
+      <div class="url-bar">
+        <input type="text" id="url-input" placeholder="粘贴下载链接,支持 HTTP/HTTPS/FTP/QUIC..." />
+        <button class="btn btn-primary" id="btn-download">开始下载</button>
+      </div>
+      <button class="btn btn-ghost" id="btn-pause-all">全部暂停</button>
+    </div>
+
+    <!-- 内容区 -->
+    <div class="content" id="content">
+      <div class="section-title">下载中</div>
+      <div id="active-downloads"></div>
+      <div class="section-title" style="margin-top: 20px;">已完成</div>
+      <div id="completed-downloads"></div>
+      <div class="empty-state" id="empty-state">
+        <div class="empty-icon">&#9660;</div>
+        <div class="empty-text">暂无下载任务</div>
+        <div class="empty-hint">在上方输入链接开始下载</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右侧详情面板 -->
+  <div class="detail-panel" id="detail-panel" style="display: none;">
+    <div class="panel-title" id="panel-filename">--</div>
+    <div class="panel-row">
+      <span class="panel-label">文件大小</span>
+      <span class="panel-value" id="panel-size">--</span>
+    </div>
+    <div class="panel-row">
+      <span class="panel-label">已下载</span>
+      <span class="panel-value" id="panel-downloaded">--</span>
+    </div>
+    <div class="panel-row">
+      <span class="panel-label">速度</span>
+      <span class="panel-value speed-value" id="panel-speed">--</span>
+    </div>
+    <div class="panel-row">
+      <span class="panel-label">分片数</span>
+      <span class="panel-value" id="panel-fragments">--</span>
+    </div>
+    <div class="panel-row">
+      <span class="panel-label">协议</span>
+      <span class="panel-value" id="panel-protocol">--</span>
+    </div>
+    <div class="panel-row">
+      <span class="panel-label">状态</span>
+      <span class="panel-value" id="panel-status">--</span>
+    </div>
+    <div style="margin-top: 16px;">
+      <div class="section-title">分片进度</div>
+      <div class="fragment-grid" id="fragment-grid"></div>
+    </div>
+  </div>
+
   <script>
-    async function init() {
-      try {
-        const { invoke } = window.__TAURI__.core;
-        const info = await invoke('get_app_info');
-        document.getElementById('app-info').textContent = `${info.name} v${info.version}`;
-      } catch (e) {
-        document.getElementById('app-info').textContent = 'QuantumFetch v0.1.0';
-      }
+    // 模拟下载数据
+    const downloads = [
+      {
+        id: '1',
+        name: 'ubuntu-24.04-desktop-amd64.iso',
+        ext: 'ISO',
+        url: 'https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso',
+        size: 5894578176,
+        downloaded: 3456789012,
+        speed: 25165824,
+        status: 'downloading',
+        fragments: 16,
+        fragmentsDone: 9,
+        protocol: 'HTTPS',
+      },
+      {
+        id: '2',
+        name: 'rust-1.78.0-x86_64-pc-windows-msvc.msi',
+        ext: 'MSI',
+        url: 'https://static.rust-lang.org/dist/rust-1.78.0-x86_64-pc-windows-msvc.msi',
+        size: 234567890,
+        downloaded: 234567890,
+        speed: 0,
+        status: 'completed',
+        fragments: 4,
+        fragmentsDone: 4,
+        protocol: 'HTTPS',
+      },
+      {
+        id: '3',
+        name: 'node-v22.0.0-x64.zip',
+        ext: 'ZIP',
+        url: 'https://nodejs.org/dist/v22.0.0/node-v22.0.0-win-x64.zip',
+        size: 31457280,
+        downloaded: 18874368,
+        speed: 4194304,
+        status: 'downloading',
+        fragments: 4,
+        fragmentsDone: 2,
+        protocol: 'HTTP/2',
+      },
+      {
+        id: '4',
+        name: 'docker-desktop-installer.exe',
+        ext: 'EXE',
+        url: 'https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe',
+        size: 524288000,
+        downloaded: 524288000,
+        speed: 0,
+        status: 'completed',
+        fragments: 8,
+        fragmentsDone: 8,
+        protocol: 'QUIC',
+      },
+    ];
+
+    let selectedId = null;
+
+    function formatSize(bytes) {
+      if (bytes === 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return (bytes / Math.pow(k, i)).toFixed(i > 1 ? 1 : 0) + ' ' + sizes[i];
     }
+
+    function formatSpeed(bytes) {
+      return formatSize(bytes) + '/s';
+    }
+
+    function getProgress(dl) {
+      return dl.size > 0 ? Math.round((dl.downloaded / dl.size) * 100) : 0;
+    }
+
+    function renderCard(dl) {
+      const progress = getProgress(dl);
+      const statusClass = `status-${dl.status}`;
+      const statusText = { downloading: '下载中', completed: '已完成', paused: '已暂停', failed: '失败' }[dl.status];
+      return `
+        <div class="download-card" data-id="${dl.id}" onclick="selectDownload('${dl.id}')">
+          <div class="card-header">
+            <div class="card-name">
+              ${dl.name}
+              <span class="ext">${dl.ext}</span>
+            </div>
+            <span class="card-status ${statusClass}">${statusText}</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill ${dl.status}" style="width: ${progress}%"></div>
+          </div>
+          <div class="card-details">
+            <div class="detail-item">
+              <span class="detail-label">进度</span>
+              <span>${progress}%</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">大小</span>
+              <span>${formatSize(dl.size)}</span>
+            </div>
+            ${dl.speed > 0 ? `<div class="detail-item"><span class="detail-label">速度</span><span class="speed-value">${formatSpeed(dl.speed)}</span></div>` : ''}
+            <div class="detail-item">
+              <span class="detail-label">分片</span>
+              <span>${dl.fragmentsDone}/${dl.fragments}</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderList() {
+      const active = downloads.filter(d => d.status === 'downloading' || d.status === 'paused');
+      const completed = downloads.filter(d => d.status === 'completed' || d.status === 'failed');
+      document.getElementById('active-downloads').innerHTML = active.map(renderCard).join('');
+      document.getElementById('completed-downloads').innerHTML = completed.map(renderCard).join('');
+      document.getElementById('empty-state').style.display = downloads.length === 0 ? 'flex' : 'none';
+
+      // 更新侧边栏统计
+      const totalSpeed = active.reduce((sum, d) => sum + d.speed, 0);
+      document.getElementById('stat-speed').textContent = formatSpeed(totalSpeed);
+      document.getElementById('stat-connections').textContent = active.reduce((sum, d) => sum + d.fragmentsDone, 0);
+      document.getElementById('stat-queue').textContent = active.length;
+    }
+
+    function selectDownload(id) {
+      selectedId = id;
+      const dl = downloads.find(d => d.id === id);
+      if (!dl) return;
+      const panel = document.getElementById('detail-panel');
+      panel.style.display = 'block';
+      document.getElementById('panel-filename').textContent = dl.name;
+      document.getElementById('panel-size').textContent = formatSize(dl.size);
+      document.getElementById('panel-downloaded').textContent = formatSize(dl.downloaded);
+      document.getElementById('panel-speed').textContent = dl.speed > 0 ? formatSpeed(dl.speed) : '--';
+      document.getElementById('panel-fragments').textContent = dl.fragments;
+      document.getElementById('panel-protocol').textContent = dl.protocol;
+      document.getElementById('panel-status').textContent = { downloading: '下载中', completed: '已完成', paused: '已暂停', failed: '失败' }[dl.status];
+
+      // 分片可视化
+      const grid = document.getElementById('fragment-grid');
+      grid.innerHTML = '';
+      for (let i = 0; i < dl.fragments; i++) {
+        const block = document.createElement('div');
+        block.className = 'fragment-block ' + (i < dl.fragmentsDone ? 'done' : (i === dl.fragmentsDone && dl.status === 'downloading' ? 'active' : 'pending'));
+        grid.appendChild(block);
+      }
+
+      // 高亮选中卡片
+      document.querySelectorAll('.download-card').forEach(card => {
+        card.style.borderColor = card.dataset.id === id ? 'var(--border-active)' : '';
+      });
+    }
+
     function startDownload() {
-      const url = document.getElementById('url').value;
-      if (url) {
-        console.log('下载:', url);
-      }
+      const url = document.getElementById('url-input').value.trim();
+      if (!url) return;
+      const name = url.split('/').pop().split('?')[0] || 'download';
+      const ext = name.split('.').pop().toUpperCase().slice(0, 4) || 'FILE';
+      const id = String(Date.now());
+      downloads.unshift({
+        id, name, ext, url, size: 0, downloaded: 0, speed: 0,
+        status: 'downloading', fragments: 1, fragmentsDone: 0, protocol: 'HTTP',
+      });
+      document.getElementById('url-input').value = '';
+      renderList();
     }
-    init();
+
+    // 事件绑定
+    document.getElementById('btn-download').addEventListener('click', startDownload);
+    document.getElementById('url-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter') startDownload();
+    });
+
+    // 模拟下载进度更新
+    setInterval(() => {
+      downloads.forEach(dl => {
+        if (dl.status === 'downloading' && dl.downloaded < dl.size) {
+          dl.downloaded = Math.min(dl.downloaded + dl.speed, dl.size);
+          if (dl.downloaded >= dl.size) {
+            dl.status = 'completed';
+            dl.speed = 0;
+            dl.fragmentsDone = dl.fragments;
+          }
+        }
+      });
+      renderList();
+      if (selectedId) selectDownload(selectedId);
+    }, 1000);
+
+    // 初始渲染
+    renderList();
   </script>
 </body>
 </html>
