@@ -5,6 +5,17 @@ edition.workspace = true
 license.workspace = true
 description = "QuantumFetch Tauri 应用入口"
 
+[lib]
+name = "qf_app_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "quantumfetch"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
 qf-core = { path = "../qf-core" }
 qf-engine = { path = "../qf-engine" }
