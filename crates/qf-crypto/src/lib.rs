@@ -6,3 +6,5 @@
 //! - 并行校验调度
 
 pub mod cpu;
+
+pub use cpu::{CpuVerifier, HashAlgorithm, auto_select_verifier};
