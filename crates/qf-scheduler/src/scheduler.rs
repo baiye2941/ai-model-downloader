@@ -45,12 +45,22 @@ impl PartialOrd for ScheduledTask {
 
 impl Ord for ScheduledTask {
     fn cmp(&self, other: &Self) -> Ordering {
-        // 按优先级 -> 进度(即将完成优先) -> 文件大小(小文件优先) -> task_id(稳定性)
+        let self_progress = if self.progress.is_nan() {
+            0.0
+        } else {
+            self.progress
+        };
+        let other_progress = if other.progress.is_nan() {
+            0.0
+        } else {
+            other.progress
+        };
+
         self.priority
             .cmp(&other.priority)
             .then_with(|| {
-                self.progress
-                    .partial_cmp(&other.progress)
+                self_progress
+                    .partial_cmp(&other_progress)
                     .unwrap_or(Ordering::Equal)
             })
             .then_with(|| other.file_size.cmp(&self.file_size))

@@ -330,7 +330,7 @@ async fn task_fn(
     };
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
-    let any_fragment_failed = false;
+    let mut any_fragment_failed = false; // 保留 mut:接入真实协议层后将在此赋值
     let mut total_downloaded: u64 = 0;
 
     for frag in &fragments {
@@ -398,7 +398,7 @@ async fn task_fn(
                 }
             }
 
-            // 模拟网络 I/O 延迟
+            // 模拟网络 I/O 延迟(未来接入真实协议层时,此处替换为实际下载调用)
             tokio::time::sleep(Duration::from_millis(2)).await;
             let simulated = chunk_size.min(frag.size - frag_downloaded);
             frag_downloaded += simulated;
@@ -427,6 +427,7 @@ async fn task_fn(
 
         // 分片完成
         orchestrator.on_fragment_complete(frag, frag_start.elapsed());
+        // TODO: 接入真实协议层后,下载失败时应设置 any_fragment_failed = true
         let fragments_done = orchestrator
             .active_fragments()
             .iter()

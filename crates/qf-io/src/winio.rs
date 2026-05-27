@@ -106,6 +106,27 @@ impl WinFile {
 
 impl AsyncStorage for WinFile {
     async fn write_at(&self, offset: u64, data: &[u8]) -> QfResult<usize> {
+        if self.no_buffering {
+            // NO_BUFFERING 模式要求:偏移量和数据长度必须对齐到扇区大小(通常 512 字节)
+            // 检查对齐约束,不满足时返回错误而非静默数据损坏
+            const SECTOR_SIZE: u64 = 512;
+            if !offset.is_multiple_of(SECTOR_SIZE) {
+                return Err(QfError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("NO_BUFFERING 模式下偏移量 {offset} 未对齐到 {SECTOR_SIZE} 字节"),
+                )));
+            }
+            if !(data.len() as u64).is_multiple_of(SECTOR_SIZE) {
+                return Err(QfError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "NO_BUFFERING 模式下数据长度 {} 未对齐到 {SECTOR_SIZE} 字节",
+                        data.len()
+                    ),
+                )));
+            }
+        }
+
         let mut file = self.file.lock().await;
         file.seek(std::io::SeekFrom::Start(offset)).await?;
         file.write_all(data).await?;
@@ -113,6 +134,25 @@ impl AsyncStorage for WinFile {
     }
 
     async fn read_at(&self, offset: u64, buf: &mut [u8]) -> QfResult<usize> {
+        if self.no_buffering {
+            const SECTOR_SIZE: u64 = 512;
+            if !offset.is_multiple_of(SECTOR_SIZE) {
+                return Err(QfError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("NO_BUFFERING 模式下偏移量 {offset} 未对齐到 {SECTOR_SIZE} 字节"),
+                )));
+            }
+            if !(buf.len() as u64).is_multiple_of(SECTOR_SIZE) {
+                return Err(QfError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "NO_BUFFERING 模式下缓冲区长度 {} 未对齐到 {SECTOR_SIZE} 字节",
+                        buf.len()
+                    ),
+                )));
+            }
+        }
+
         let mut file = self.file.lock().await;
         file.seek(std::io::SeekFrom::Start(offset)).await?;
         let read = file.read(buf).await?;

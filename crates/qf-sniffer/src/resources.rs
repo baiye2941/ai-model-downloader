@@ -165,24 +165,28 @@ fn extract_filename_from_url(url: &str) -> String {
         .unwrap_or_else(|| "download".to_string())
 }
 
-/// 简单 URL 解码(%XX -> 字符)
+/// URL 百分号解码(支持多字节 UTF-8 序列)
+///
+/// 对 `%XX` 编码的原始字节进行解码,然后尝试将结果解释为 UTF-8 字符串。
+/// 这正确处理了多字节 UTF-8 序列(如中文 `%E4%B8%AD`)。
 fn urlencoding_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
     let bytes: Vec<u8> = s.bytes().collect();
+    let mut decoded = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
             && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
         {
-            result.push((hi * 16 + lo) as char);
+            decoded.push(hi * 16 + lo);
             i += 3;
             continue;
         }
-        result.push(bytes[i] as char);
+        decoded.push(bytes[i]);
         i += 1;
     }
-    result
+    String::from_utf8(decoded)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 fn hex_val(b: u8) -> Option<u8> {

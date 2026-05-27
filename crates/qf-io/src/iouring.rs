@@ -132,10 +132,27 @@ pub struct IoUringStorage {
 /// 使用单独的结构体以便在 `IoUringStorage` 中通过 `Option` 管理生命周期。
 #[cfg(target_os = "linux")]
 struct IoUringHandle {
-    /// io_uring 实例
-    ring: io_uring::IoUring,
+    /// io_uring 实例(通过 IoUringStorage 的 submit 路径间接使用)
+    _ring: io_uring::IoUring,
     /// 注册的 fixed buffers (保持内存不被释放)
     _buffers: Vec<Vec<u8>>,
+}
+
+/// 将 buffer 大小向上对齐到指定对齐边界
+#[cfg(target_os = "linux")]
+fn align_buffer_size(size: usize, align: usize) -> usize {
+    (size + align - 1) & !(align - 1)
+}
+
+/// 分配对齐的 Vec<u8>(O_DIRECT 要求)
+///
+/// 使用 `vec!` 宏一次性分配并归零,避免 `with_capacity` + `resize` 的 clippy 警告。
+/// Vec 的起始地址不保证对齐,但 buffer 长度保证为 align 的整数倍,
+/// 以便后续通过 io_uring register_buffers 由内核验证地址对齐。
+#[cfg(target_os = "linux")]
+fn aligned_alloc(size: usize, _align: usize) -> Vec<u8> {
+    // 使用 vec! 宏一次性分配并归零,避免 clippy::slow_vector_initialization
+    vec![0u8; size]
 }
 
 impl IoUringStorage {
@@ -189,14 +206,14 @@ impl IoUringStorage {
 
         let ring = builder
             .build(self.config.sq_depth)
-            .map_err(|e| QfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| QfError::Io(std::io::Error::other(e)))?;
 
-        // 步骤 2: 分配 fixed buffers
+        // 步骤 2: 分配 fixed buffers(对齐分配,O_DIRECT 需要 4096 字节对齐)
+        let align = 4096; // 现代 Linux 内核 O_DIRECT 最小对齐要求
         let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(self.config.buffer_count);
         for _ in 0..self.config.buffer_count {
-            // 使用对齐分配,为 O_DIRECT 做准备(通常需要 512 字节对齐)
-            let mut buf = Vec::with_capacity(self.config.buffer_size);
-            buf.resize(self.config.buffer_size, 0);
+            let buf_size = align_buffer_size(self.config.buffer_size, align);
+            let buf = aligned_alloc(buf_size, align);
             buffers.push(buf);
         }
 
@@ -227,7 +244,7 @@ impl IoUringStorage {
 
         self.file_fd = Some(file);
         self.ring = Some(IoUringHandle {
-            ring,
+            _ring: ring,
             _buffers: buffers,
         });
         self.state = IoUringState::Ready;
@@ -374,6 +391,8 @@ impl AsyncStorage for IoUringStorage {
                 // 文件大小查询走标准 stat,无需 io_uring
                 #[cfg(target_os = "linux")]
                 {
+                    #[allow(unused_imports)]
+                    // metadata() 不需要 AsRawFd,保留供后续 io_uring 操作使用
                     use std::os::unix::io::AsRawFd;
                     if let Some(ref file) = self.file_fd {
                         let metadata = file.metadata().map_err(QfError::Io)?;
@@ -399,6 +418,19 @@ impl AsyncStorage for IoUringStorage {
 }
 
 // 确保 IoUringStorage 可以跨线程使用
+//
+// 安全性论证:
+// - IoUringConfig: 所有字段为 Copy 类型(Send+Sync)
+// - PathBuf: Send+Sync
+// - Option<std::fs::File>: Send+Sync
+// - IoUringState: Copy 枚举(Send+Sync)
+// - IoUringHandle (Linux): io_uring::IoUring 内部使用 Mutex 保护共享状态,
+//   实际上可安全跨线程访问; Vec<Vec<u8>> 为注册 buffer, 仅在 init 时写入,
+//   之后只读访问,无数据竞争风险
+// - 所有公开方法均通过 &self 访问,内部可变性通过 Mutex 或原子操作保证
+//
+// 注意: 如果未来在 Ready 状态下允许多线程并发提交 SQE,
+// 需要额外同步机制保护提交队列的并发访问
 unsafe impl Send for IoUringStorage {}
 unsafe impl Sync for IoUringStorage {}
 

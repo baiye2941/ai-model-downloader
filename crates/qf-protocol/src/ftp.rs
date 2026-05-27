@@ -174,6 +174,59 @@ impl FtpClient {
         Ok(Bytes::from(buf))
     }
 
+    /// 使用 REST 命令从指定偏移处恢复下载,并截取所需字节范围
+    ///
+    /// FTP 的 REST 命令设置文件指针偏移,然后 RETR 从该偏移开始传输。
+    /// 我们从 `start` 偏移处开始下载,读取 `end - start + 1` 字节后关闭数据连接。
+    /// 必须在 `login()` 成功后调用。
+    pub async fn retrieve_range(&self, path: &str, start: u64, end: u64) -> QfResult<Bytes> {
+        let mut guard = self.inner.lock().await;
+        Self::require_stream(&guard)?;
+        let stream = guard
+            .stream
+            .as_mut()
+            .ok_or_else(|| QfError::Protocol("FTP 流不可用".into()))?;
+
+        stream
+            .transfer_type(FileType::Binary)
+            .await
+            .map_err(|e| QfError::Protocol(format!("设置传输模式失败: {e}")))?;
+
+        let need = (end - start + 1) as usize;
+
+        if start > 0 {
+            stream
+                .resume_transfer(start as usize)
+                .await
+                .map_err(|e| QfError::Protocol(format!("REST 命令失败: {e}")))?;
+        }
+
+        let mut data_stream = stream
+            .retr_as_stream(path)
+            .await
+            .map_err(|e| QfError::Protocol(format!("下载文件失败: {e}")))?;
+
+        let mut buf = vec![0u8; need];
+        let mut total_read = 0usize;
+        while total_read < need {
+            let n = tokio::io::AsyncReadExt::read(&mut data_stream, &mut buf[total_read..])
+                .await
+                .map_err(|e| QfError::Network(format!("读取 FTP 数据流失败: {e}")))?;
+            if n == 0 {
+                break;
+            }
+            total_read += n;
+        }
+        buf.truncate(total_read);
+
+        stream
+            .finalize_retr_stream(data_stream)
+            .await
+            .map_err(|e| QfError::Protocol(format!("完成 FTP 传输失败: {e}")))?;
+
+        Ok(Bytes::from(buf))
+    }
+
     /// 当前是否已连接(包含已认证状态)
     pub async fn is_connected(&self) -> bool {
         let guard = self.inner.lock().await;
@@ -344,24 +397,25 @@ impl Protocol for FtpClient {
 
     /// 按字节范围下载文件
     ///
-    /// FTP 不原生支持 Range 请求,此方法先下载完整文件再切片。
+    /// 使用 FTP REST 命令从指定偏移处恢复下载,然后截取所需范围。
+    /// 相比下载整个文件再切片,此方法在大文件场景下可节省大量带宽和时间。
     /// `start` 和 `end` 均为闭区间字节偏移。
     async fn download_range(&self, url: &str, start: u64, end: u64) -> QfResult<Bytes> {
-        let full = self.download_full(url).await?;
-
-        let start = start as usize;
-        let end = (end as usize).saturating_add(1); // 闭区间 -> 半开区间
-
-        if start >= full.len() {
-            return Err(QfError::Protocol(format!(
-                "Range 起始位置 {} 超出文件大小 {}",
-                start,
-                full.len()
-            )));
+        if start == 0 && end == 0 {
+            return self.download_full(url).await;
         }
 
-        let end = end.min(full.len());
-        Ok(full.slice(start..end))
+        let info = Self::parse_ftp_url(url)?;
+
+        self.connect(&info.host, info.port).await?;
+        if let Err(e) = self.login(&info.username, &info.password).await {
+            self.disconnect().await;
+            return Err(e);
+        }
+
+        let result = self.retrieve_range(&info.path, start, end).await;
+        self.disconnect().await;
+        result
     }
 
     /// 下载整个 FTP 文件

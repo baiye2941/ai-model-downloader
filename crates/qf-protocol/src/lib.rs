@@ -43,14 +43,14 @@ mod protocol_tests {
 
     #[tokio::test]
     async fn test_quic_protocol_trait_consistency() {
-        let quic = QuicTransport::new().await.unwrap();
+        let quic = QuicTransport::new_insecure().await.unwrap();
         verify_protocol_returns_error(&quic, "https://example.com/file.bin").await;
     }
 
     #[tokio::test]
     async fn test_all_protocols_consistent_error_messages() {
         let ftp = FtpClient::new();
-        let quic = QuicTransport::new().await.unwrap();
+        let quic = QuicTransport::new_insecure().await.unwrap();
 
         // FTP 客户端对不可达地址返回 Network 错误
         let ftp_err = ftp.probe("ftp://127.0.0.1:1/test").await.unwrap_err();
@@ -72,7 +72,7 @@ mod protocol_tests {
         use qf_core::QfError;
 
         let ftp = FtpClient::new();
-        let quic = QuicTransport::new().await.unwrap();
+        let quic = QuicTransport::new_insecure().await.unwrap();
 
         // FTP 对不可达地址返回 Network 变体
         let ftp_err = ftp.probe("ftp://127.0.0.1:1/test").await.unwrap_err();

@@ -15,6 +15,7 @@ tracing.workspace = true
 futures.workspace = true
 quinn.workspace = true
 rustls.workspace = true
+rustls-native-certs = "0.8"
 rcgen.workspace = true
 suppaftp.workspace = true
 

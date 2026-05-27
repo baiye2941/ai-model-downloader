@@ -209,11 +209,11 @@ pub enum VerifierKind {
     Cpu(CpuVerifier),
 }
 
-// CpuVerifier 是无状态的,创建新实例等价于 clone
+// CpuVerifier 是无状态的,clone 时保留原始算法
 impl Clone for VerifierKind {
     fn clone(&self) -> Self {
         match self {
-            VerifierKind::Cpu(_) => VerifierKind::Cpu(CpuVerifier::blake3()),
+            VerifierKind::Cpu(v) => VerifierKind::Cpu(v.clone()),
         }
     }
 }

@@ -38,24 +38,65 @@ impl QuicTransport {
     ///
     /// 需要在异步上下文中调用(需要 tokio 运行时)。
     pub async fn new() -> QfResult<Self> {
-        // 安装 ring 加密提供器(幂等操作)
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        // 生成自签名证书
+        let mut root_store = rustls::RootCertStore::empty();
+        let certs = rustls_native_certs::load_native_certs();
+        if let Some(err) = certs.errors.first() {
+            tracing::warn!("加载系统根证书时出现错误: {err:?}");
+        }
+        for cert in &certs.certs {
+            root_store.add(cert.clone()).ok();
+        }
+
+        let tls_config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().map_err(
+            |e: std::net::AddrParseError| QfError::Network(format!("解析本地地址失败: {e}")),
+        )?)
+        .map_err(|e| QfError::Network(format!("创建 QUIC 端点失败: {e}")))?;
+
+        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
+            .map_err(|e| QfError::Network(format!("构建 QUIC 客户端配置失败: {e}")))?;
+
+        endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(crypto)));
+
+        Ok(Self {
+            endpoint,
+            connection: None,
+        })
+    }
+
+    /// 使用已有 quinn::Endpoint 创建(高级用法)
+    pub fn with_endpoint(endpoint: quinn::Endpoint) -> Self {
+        Self {
+            endpoint,
+            connection: None,
+        }
+    }
+
+    /// 创建用于测试的 QUIC 传输实例(接受自签名证书)
+    ///
+    /// # 安全性
+    ///
+    /// 此方法跳过 TLS 证书校验,仅应在测试环境中使用。
+    #[cfg(test)]
+    pub async fn new_insecure() -> QfResult<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
             .map_err(|e| QfError::Network(format!("生成自签名证书失败: {e}")))?;
 
         let key = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
         let cert_der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
 
-        // 构建客户端 TLS 配置,允许自签名证书(测试用)
-        let mut crypto = rustls::ClientConfig::builder()
+        let crypto = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
             .with_client_auth_cert(vec![cert_der], key.into())
             .map_err(|e| QfError::Network(format!("构建 TLS 配置失败: {e}")))?;
-
-        crypto.alpn_protocols = vec![b"h3".to_vec()];
 
         let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().map_err(
             |e: std::net::AddrParseError| QfError::Network(format!("解析本地地址失败: {e}")),
@@ -71,14 +112,6 @@ impl QuicTransport {
             endpoint,
             connection: None,
         })
-    }
-
-    /// 使用已有 quinn::Endpoint 创建(高级用法)
-    pub fn with_endpoint(endpoint: quinn::Endpoint) -> Self {
-        Self {
-            endpoint,
-            connection: None,
-        }
     }
 
     /// 连接到远程 QUIC 服务器
@@ -400,9 +433,16 @@ fn build_full_request(url: &str) -> QfResult<Vec<u8>> {
 use std::sync::Arc;
 
 /// 不安全的证书验证器 -- 仅用于测试,接受任何证书
+///
+/// # 安全性
+///
+/// 此验证器跳过所有 TLS 证书校验,仅应在测试环境中使用。
+/// 在生产代码中使用将导致中间人攻击(MITM)风险。
+#[cfg(test)]
 #[derive(Debug)]
 struct InsecureVerifier;
 
+#[cfg(test)]
 impl rustls::client::danger::ServerCertVerifier for InsecureVerifier {
     fn verify_server_cert(
         &self,
@@ -483,19 +523,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_quic_transport_creation() {
-        let transport = QuicTransport::new().await;
-        assert!(transport.is_ok(), "QuicTransport::new() 应成功创建");
+        let transport = QuicTransport::new_insecure().await;
+        assert!(
+            transport.is_ok(),
+            "QuicTransport::new_insecure() 应成功创建"
+        );
     }
 
     #[tokio::test]
     async fn test_quic_transport_initially_disconnected() {
-        let transport = QuicTransport::new().await.unwrap();
+        let transport = QuicTransport::new_insecure().await.unwrap();
         assert!(!transport.is_connected(), "新创建的传输不应处于已连接状态");
     }
 
     #[tokio::test]
     async fn test_quic_transport_no_initial_connection() {
-        let transport = QuicTransport::new().await.unwrap();
+        let transport = QuicTransport::new_insecure().await.unwrap();
         assert!(
             transport.connection().is_none(),
             "新创建的传输不应有活跃连接"
@@ -504,7 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_quic_transport_disconnect_on_drop() {
-        let transport = QuicTransport::new().await.unwrap();
+        let transport = QuicTransport::new_insecure().await.unwrap();
         // 确保 Drop 不会 panic
         drop(transport);
     }
@@ -520,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_probe_returns_error_when_not_connected() {
-        let transport = QuicTransport::new().await.unwrap();
+        let transport = QuicTransport::new_insecure().await.unwrap();
         let result = transport.probe("https://example.com/file.bin").await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -532,7 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_range_returns_error_when_not_connected() {
-        let transport = QuicTransport::new().await.unwrap();
+        let transport = QuicTransport::new_insecure().await.unwrap();
         let result = transport
             .download_range("https://example.com/file.bin", 0, 1023)
             .await;
@@ -542,7 +585,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_full_returns_error_when_not_connected() {
-        let transport = QuicTransport::new().await.unwrap();
+        let transport = QuicTransport::new_insecure().await.unwrap();
         let result = transport
             .download_full("https://example.com/file.bin")
             .await;
@@ -835,7 +878,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_protocol_trait_probe_error_variant() {
-        let transport = QuicTransport::new().await.unwrap();
+        let transport = QuicTransport::new_insecure().await.unwrap();
         let err = transport
             .probe("https://example.com/test")
             .await
@@ -848,7 +891,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_protocol_trait_download_range_error_variant() {
-        let transport = QuicTransport::new().await.unwrap();
+        let transport = QuicTransport::new_insecure().await.unwrap();
         let err = transport
             .download_range("https://example.com/test", 0, 100)
             .await
@@ -858,7 +901,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_protocol_trait_download_full_error_variant() {
-        let transport = QuicTransport::new().await.unwrap();
+        let transport = QuicTransport::new_insecure().await.unwrap();
         let err = transport
             .download_full("https://example.com/test")
             .await

@@ -15,6 +15,7 @@ pub enum HashAlgorithm {
 }
 
 /// CPU 校验器,支持 blake3 和 sha256
+#[derive(Clone)]
 pub struct CpuVerifier {
     algorithm: HashAlgorithm,
 }
