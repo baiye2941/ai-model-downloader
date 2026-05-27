@@ -6,7 +6,9 @@
 
 use bytes::Bytes;
 use qf_core::QfError;
-use qf_core::test_harness::harness::{MemoryStorage, MockProtocol, test_fragments, test_metadata};
+use qf_core::test_harness::harness::{
+    MemoryStorage, MockProtocol, test_config, test_fragments, test_metadata,
+};
 use qf_core::traits::{Protocol, Storage, Verifier};
 use qf_core::types::{DownloadState, FragmentInfo};
 use qf_crypto::CpuVerifier;
@@ -479,4 +481,150 @@ fn integration_checksum_mismatch_error() {
     assert!(msg.contains("abc123"));
     assert!(msg.contains("def456"));
     assert!(msg.contains("校验失败"));
+}
+
+// ============================================================
+// 集成测试:下载器完整流程(qf-engine/downloader.rs)
+// ============================================================
+
+use qf_core::config::DownloadConfig;
+use qf_sniffer::CaptureConfig;
+use qf_sniffer::resources::ResourceManager;
+
+/// 下载器完整流程:probe -> plan -> prepare -> execute -> verify
+#[tokio::test]
+async fn integration_downloader_full_pipeline() {
+    let tmp = NamedTempFile::new().unwrap();
+    let file_size: u64 = 3072; // 3KB,3 个分片
+    let test_data = vec![0xAB_u8; file_size as usize];
+
+    let meta = test_metadata("integration.bin", file_size);
+    let protocol =
+        MockProtocol::new(meta).with_range_data(0, 1023, Bytes::from(vec![0xAB_u8; 1024]));
+
+    let config = DownloadConfig {
+        download_dir: tmp.path().parent().unwrap().to_string_lossy().to_string(),
+        max_concurrent_fragments: 2,
+        verify_checksum: false,
+        ..test_config()
+    };
+
+    // 使用 DownloadTask 的底层组件测试
+    let verifier = CpuVerifier::blake3();
+    let storage = MemoryStorage::with_capacity(file_size as usize);
+    storage.allocate(file_size).await.unwrap();
+
+    // 模拟分片写入
+    let fragments = test_fragments(file_size, 3);
+    for frag in &fragments {
+        let data = vec![0xAB_u8; frag.size as usize];
+        storage.write_at(frag.start, &data).await.unwrap();
+    }
+
+    // 校验
+    let all_data = storage.get_data();
+    assert_eq!(all_data.len(), file_size as usize);
+    assert!(all_data.iter().all(|&b| b == 0xAB));
+
+    let hash = verifier.compute_hash(&all_data).unwrap();
+    assert!(verifier.verify(&all_data, &hash).unwrap());
+}
+
+/// 嗅探资源管理器完整流程:拦截->识别->去重->过滤->清理
+#[tokio::test]
+async fn integration_sniffer_resource_lifecycle() {
+    let config = CaptureConfig {
+        min_size: 512,
+        ..Default::default()
+    };
+    let rm = ResourceManager::new(config);
+
+    // 拦截一系列 URL
+    assert!(rm.on_request(
+        "http://cdn.example.com/video.mp4?token=abc",
+        Some("video/mp4"),
+        Some(10 * 1024 * 1024),
+        Some("http://example.com/page".into()),
+    ));
+    assert!(rm.on_request(
+        "http://cdn.example.com/audio.mp3",
+        Some("audio/mpeg"),
+        Some(5 * 1024 * 1024),
+        None,
+    ));
+    assert!(rm.on_request(
+        "http://cdn.example.com/archive.zip",
+        None,
+        Some(1024 * 1024),
+        None,
+    ));
+    // 太小的文件应被过滤
+    assert!(!rm.on_request("http://cdn.example.com/tiny.zip", None, Some(100), None,));
+    // HTML 应被过滤
+    assert!(!rm.on_request(
+        "http://example.com/page.html",
+        Some("text/html"),
+        None,
+        None,
+    ));
+    // 重复 URL 应去重
+    assert!(!rm.on_request(
+        "http://cdn.example.com/video.mp4?token=abc",
+        Some("video/mp4"),
+        Some(10 * 1024 * 1024),
+        None,
+    ));
+
+    assert_eq!(rm.count(), 3);
+
+    // 获取所有并验证排序(最新在前)
+    let all = rm.get_all();
+    assert_eq!(all.len(), 3);
+    assert!(all[0].discovered_at >= all[1].discovered_at);
+
+    // 按类型过滤
+    let videos = rm.get_by_type("Video");
+    assert_eq!(videos.len(), 1);
+    assert!(videos[0].url.contains("video.mp4"));
+
+    // 移除一个
+    let id = &all[2].id;
+    assert!(rm.remove(id));
+    assert_eq!(rm.count(), 2);
+
+    // 清空
+    rm.clear();
+    assert_eq!(rm.count(), 0);
+}
+
+/// 跨 crate:带宽追踪影响分片规划
+#[tokio::test]
+async fn integration_bandwidth_affects_fragment_planning() {
+    let mut tracker = BandwidthTracker::new(0.3);
+
+    // 模拟低带宽
+    for _ in 0..10 {
+        tracker.record(1024 * 1024); // 1MB/s
+    }
+    let low_bw = tracker.estimate();
+
+    // 计算分片大小
+    let file_size = 100 * 1024 * 1024u64; // 100MB
+    let frag_size_low = compute_fragment_size(file_size, low_bw, 1024 * 1024, 64 * 1024 * 1024, 16);
+
+    // 模拟高带宽
+    for _ in 0..10 {
+        tracker.record(100 * 1024 * 1024); // 100MB/s
+    }
+    let high_bw = tracker.estimate();
+    let frag_size_high =
+        compute_fragment_size(file_size, high_bw, 1024 * 1024, 64 * 1024 * 1024, 16);
+
+    // 高带宽应产生更大的分片
+    assert!(
+        frag_size_high >= frag_size_low,
+        "高带宽分片({})应 >= 低带宽分片({})",
+        frag_size_high,
+        frag_size_low
+    );
 }

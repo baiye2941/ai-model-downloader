@@ -16,6 +16,7 @@ futures.workspace = true
 quinn.workspace = true
 rustls.workspace = true
 rcgen.workspace = true
+suppaftp.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

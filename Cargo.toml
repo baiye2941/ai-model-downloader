@@ -46,6 +46,12 @@ rcgen = "0.13"
 blake3 = "1"
 sha2 = "0.10"
 
+# GPU
+wgpu = "24"
+
+# FTP
+suppaftp = { version = "8", features = ["tokio"] }
+
 # Tauri
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-build = "2"
@@ -83,6 +89,7 @@ qf-io = { path = "crates/qf-io" }
 qf-engine = { path = "crates/qf-engine" }
 qf-crypto = { path = "crates/qf-crypto" }
 qf-scheduler = { path = "crates/qf-scheduler" }
+qf-sniffer = { path = "crates/qf-sniffer" }
 blake3 = { workspace = true }
 sha2 = { workspace = true }
 bytes = { workspace = true }

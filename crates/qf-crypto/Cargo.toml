@@ -12,6 +12,11 @@ sha2.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 tracing.workspace = true
+wgpu = { workspace = true, optional = true }
+
+[features]
+default = []
+gpu = ["dep:wgpu"]
 
 [dev-dependencies]
 tempfile.workspace = true

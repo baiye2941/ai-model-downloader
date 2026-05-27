@@ -2,9 +2,15 @@
 //!
 //! 提供多种哈希校验方案:
 //! - CPU 校验(blake3 / sha256)
-//! - GPU 校验(wgpu compute shader, 可选)
+//! - GPU 校验(wgpu compute shader, 可选 feature `gpu`)
 //! - 并行校验调度
 
 pub mod cpu;
 
+#[cfg(feature = "gpu")]
+pub mod gpu;
+
 pub use cpu::{CpuVerifier, HashAlgorithm, auto_select_verifier};
+
+#[cfg(feature = "gpu")]
+pub use gpu::GpuVerifier;

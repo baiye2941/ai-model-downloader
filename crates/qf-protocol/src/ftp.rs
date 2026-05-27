@@ -1,20 +1,31 @@
 //! FTP 客户端实现
 //!
-//! 基于 tokio::net::TcpStream 的异步 FTP 客户端,支持:
+//! 基于 suppaftp crate 的异步 FTP 客户端,支持:
 //! - 主动/被动模式连接
-//! - 用户名/密码认证
-//! - 文件大小查询
-//! - 文件下载
+//! - 用户名/密码认证(匿名登录)
+//! - 文件大小查询(SIZE 命令)
+//! - 文件下载(RETR 命令)
+//! - Binary 传输模式
 //!
-//! 当前为骨架实现,核心方法返回 Protocol 错误,
-//! 后续完成 FTP 协议状态机后启用端到端逻辑。
+//! `Protocol` trait 方法(`probe`/`download_range`/`download_full`)每次调用
+//! 均建立独立连接,操作完成后自动断开,适合无状态调用场景。
+//! `connect`/`login`/`retrieve` 等实例方法维护持久连接状态。
 
 use bytes::Bytes;
 use qf_core::traits::Protocol;
 use qf_core::types::FileMetadata;
 use qf_core::{QfError, QfResult};
+use suppaftp::tokio::AsyncFtpStream;
+use suppaftp::types::FileType;
+use tokio::io::AsyncReadExt;
+use tokio::sync::Mutex;
 
 /// FTP 连接状态
+///
+/// 跟踪控制连接的生命周期阶段:
+/// - `Disconnected`: 未建立 TCP 连接
+/// - `Connected`: 已建立 TCP 连接,等待 USER/PASS 认证
+/// - `Authenticated`: 已登录,可执行 FTP 命令
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FtpState {
     /// 未连接
@@ -25,121 +36,258 @@ enum FtpState {
     Authenticated,
 }
 
-/// FTP 协议客户端
-///
-/// 管理 FTP 控制连接的生命周期和认证状态。
-pub struct FtpClient {
+/// 内部连接状态:绑定 FTP 流和认证信息
+struct ConnectionState {
     /// 当前连接状态
     state: FtpState,
+    /// suppaftp 异步 FTP 流(含控制连接)
+    stream: Option<AsyncFtpStream>,
     /// 远程主机地址
-    host: Option<String>,
+    host: String,
     /// 远程端口
-    port: Option<u16>,
-    /// 登录用户名
-    user: Option<String>,
+    port: u16,
+    /// 登录用户名(匿名登录时为 "anonymous")
+    username: Option<String>,
+}
+
+/// FTP 协议客户端
+///
+/// 内部使用 `tokio::sync::Mutex` 保护连接状态,使 `Protocol` trait 的 `&self`
+/// 方法可安全地执行需要 `&mut FtpStream` 的 FTP 操作。
+pub struct FtpClient {
+    /// 持久连接状态(通过 Mutex 实现内部可变性)
+    inner: Mutex<ConnectionState>,
 }
 
 impl FtpClient {
     /// 创建新的 FTP 客户端实例
+    ///
+    /// 初始状态为 `Disconnected`,不建立任何网络连接。
     pub fn new() -> Self {
         Self {
-            state: FtpState::Disconnected,
-            host: None,
-            port: None,
-            user: None,
+            inner: Mutex::new(ConnectionState {
+                state: FtpState::Disconnected,
+                stream: None,
+                host: String::new(),
+                port: 0,
+                username: None,
+            }),
         }
     }
 
     /// 连接到 FTP 服务器
     ///
-    /// 建立 TCP 控制连接并读取服务器欢迎消息。
-    pub async fn connect(&mut self, host: &str, port: u16) -> QfResult<()> {
-        // 后续实现:tokio::net::TcpStream::connect + 读取 220 欢迎消息
-        self.host = Some(host.to_string());
-        self.port = Some(port);
-        self.state = FtpState::Connected;
+    /// 建立 TCP 控制连接并读取服务器 220 欢迎消息。
+    /// 地址格式: `host:port`(如 `"ftp.example.com:21"`)。
+    pub async fn connect(&self, host: &str, port: u16) -> QfResult<()> {
+        let addr = format!("{host}:{port}");
+        let stream = AsyncFtpStream::connect(&addr)
+            .await
+            .map_err(|e| QfError::Network(format!("FTP 连接失败: {e}")))?;
+
+        let mut guard = self.inner.lock().await;
+        guard.stream = Some(stream);
+        guard.host = host.to_string();
+        guard.port = port;
+        guard.state = FtpState::Connected;
         tracing::info!(host, port, "FTP 控制连接已建立");
         Ok(())
     }
 
-    /// 使用 FTP 登录
+    /// 使用用户名和密码登录 FTP 服务器
     ///
     /// 发送 USER 和 PASS 命令完成认证。
-    pub async fn login(&mut self, user: &str, pass: &str) -> QfResult<()> {
-        if self.state != FtpState::Connected {
+    /// 必须在 `connect()` 成功后调用。
+    pub async fn login(&self, user: &str, pass: &str) -> QfResult<()> {
+        let mut guard = self.inner.lock().await;
+        if guard.state != FtpState::Connected {
             return Err(QfError::Protocol(
                 "FTP 未连接,无法登录 -- 请先调用 connect()".into(),
             ));
         }
-        // 后续实现:发送 USER <user>\r\n 和 PASS <pass>\r\n
-        self.user = Some(user.to_string());
-        self.state = FtpState::Authenticated;
+        let stream = guard
+            .stream
+            .as_mut()
+            .ok_or_else(|| QfError::Protocol("FTP 流不可用".into()))?;
+
+        stream
+            .login(user, pass)
+            .await
+            .map_err(|e| QfError::Protocol(format!("FTP 登录失败: {e}")))?;
+
+        guard.username = Some(user.to_string());
+        guard.state = FtpState::Authenticated;
         tracing::info!(user, "FTP 登录成功");
-        let _ = pass; // pass 当前未存储,后续发送给服务端
         Ok(())
     }
 
-    /// 查询远程文件大小
+    /// 查询远程文件大小(字节)
     ///
-    /// 发送 SIZE 命令获取文件字节数。
-    pub async fn file_size(&mut self, path: &str) -> QfResult<u64> {
-        self.require_authenticated()?;
-        // 后续实现:发送 SIZE <path>\r\n 并解析 213 响应
-        tracing::warn!(path, "FTP file_size 尚未完全实现");
-        Err(QfError::Protocol("FTP 传输尚未完全实现".into()))
+    /// 发送 SIZE 命令获取指定路径文件的字节数。
+    /// 必须在 `login()` 成功后调用。
+    pub async fn file_size(&self, path: &str) -> QfResult<u64> {
+        let mut guard = self.inner.lock().await;
+        Self::require_stream(&guard)?;
+        let stream = guard.stream.as_mut().expect("require_stream 已验证流存在");
+
+        let size = stream
+            .size(path)
+            .await
+            .map_err(|e| QfError::Protocol(format!("获取文件大小失败: {e}")))?;
+        Ok(size as u64)
     }
 
-    /// 下载整个文件
+    /// 下载整个文件到内存
     ///
     /// 使用 RETR 命令通过数据连接接收文件内容。
-    pub async fn retrieve(&mut self, path: &str) -> QfResult<Bytes> {
-        self.require_authenticated()?;
-        // 后续实现:发送 PASV + RETR <path>\r\n 并读取数据连接
-        tracing::warn!(path, "FTP retrieve 尚未完全实现");
-        Err(QfError::Protocol("FTP 传输尚未完全实现".into()))
+    /// FTP 不原生支持 Range 请求,此方法始终下载完整文件。
+    /// 必须在 `login()` 成功后调用。
+    pub async fn retrieve(&self, path: &str) -> QfResult<Bytes> {
+        let mut guard = self.inner.lock().await;
+        Self::require_stream(&guard)?;
+        let stream = guard.stream.as_mut().expect("require_stream 已验证流存在");
+
+        // 确保使用 Binary 模式,避免文本文件换行符转换导致数据损坏
+        stream
+            .transfer_type(FileType::Binary)
+            .await
+            .map_err(|e| QfError::Protocol(format!("设置传输模式失败: {e}")))?;
+
+        // 获取数据流并读取全部内容
+        let mut data_stream = stream
+            .retr_as_stream(path)
+            .await
+            .map_err(|e| QfError::Protocol(format!("下载文件失败: {e}")))?;
+
+        let mut buf = Vec::new();
+        data_stream
+            .read_to_end(&mut buf)
+            .await
+            .map_err(|e| QfError::Network(format!("读取 FTP 数据流失败: {e}")))?;
+
+        // 完成 RETR 传输并读取服务端响应
+        stream
+            .finalize_retr_stream(data_stream)
+            .await
+            .map_err(|e| QfError::Protocol(format!("完成 FTP 传输失败: {e}")))?;
+
+        Ok(Bytes::from(buf))
     }
 
     /// 当前是否已连接(包含已认证状态)
-    pub fn is_connected(&self) -> bool {
-        matches!(self.state, FtpState::Connected | FtpState::Authenticated)
+    pub async fn is_connected(&self) -> bool {
+        let guard = self.inner.lock().await;
+        matches!(guard.state, FtpState::Connected | FtpState::Authenticated)
     }
 
     /// 当前是否已登录
-    pub fn is_authenticated(&self) -> bool {
-        self.state == FtpState::Authenticated
+    pub async fn is_authenticated(&self) -> bool {
+        let guard = self.inner.lock().await;
+        guard.state == FtpState::Authenticated
     }
 
     /// 获取远程主机地址
-    pub fn host(&self) -> Option<&str> {
-        self.host.as_deref()
+    pub async fn host(&self) -> String {
+        let guard = self.inner.lock().await;
+        guard.host.clone()
     }
 
     /// 获取远程端口
-    pub fn port(&self) -> Option<u16> {
-        self.port
+    pub async fn port(&self) -> u16 {
+        let guard = self.inner.lock().await;
+        guard.port
     }
 
     /// 获取登录用户名
-    pub fn username(&self) -> Option<&str> {
-        self.user.as_deref()
+    pub async fn username(&self) -> Option<String> {
+        let guard = self.inner.lock().await;
+        guard.username.clone()
     }
 
-    /// 断开连接
-    pub fn disconnect(&mut self) {
-        self.state = FtpState::Disconnected;
-        self.host = None;
-        self.port = None;
-        self.user = None;
+    /// 断开连接并释放资源
+    ///
+    /// 发送 QUIT 命令优雅关闭控制连接,重置所有内部状态。
+    pub async fn disconnect(&self) {
+        let mut guard = self.inner.lock().await;
+        if let Some(mut stream) = guard.stream.take() {
+            let _ = stream.quit().await;
+        }
+        guard.state = FtpState::Disconnected;
+        guard.host = String::new();
+        guard.port = 0;
+        guard.username = None;
     }
 
-    /// 检查是否已认证,未认证则返回错误
-    fn require_authenticated(&self) -> QfResult<()> {
-        if self.state != FtpState::Authenticated {
+    // --------------- 内部辅助方法 ---------------
+
+    /// 检查 FTP 流是否可用(已连接且流存在)
+    fn require_stream(state: &ConnectionState) -> QfResult<()> {
+        if state.stream.is_none() {
             return Err(QfError::Protocol(
-                "FTP 未登录,无法执行命令 -- 请先调用 login()".into(),
+                "FTP 未连接,无法执行命令 -- 请先调用 connect()".into(),
             ));
         }
         Ok(())
+    }
+
+    /// 从 FTP URL 解析连接信息
+    ///
+    /// URL 格式: `ftp://[user[:password]@]host[:port]/path`
+    ///
+    /// - 用户名默认 `"anonymous"`
+    /// - 密码默认 `"anonymous@quantumfetch"`
+    /// - 端口默认 `21`
+    fn parse_ftp_url(url: &str) -> QfResult<FtpUrl> {
+        let parsed = url::Url::parse(url)
+            .map_err(|e| QfError::Protocol(format!("FTP URL 解析失败: {e}")))?;
+
+        if parsed.scheme() != "ftp" {
+            return Err(QfError::Protocol(format!(
+                "URL 方案不是 ftp: {}",
+                parsed.scheme()
+            )));
+        }
+
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| QfError::Protocol("FTP URL 缺少主机名".into()))?
+            .to_string();
+
+        let port = parsed.port().unwrap_or(21);
+
+        let username = if parsed.username().is_empty() {
+            "anonymous".to_string()
+        } else {
+            parsed.username().to_string()
+        };
+
+        let password = parsed
+            .password()
+            .unwrap_or("anonymous@quantumfetch")
+            .to_string();
+
+        let path = parsed.path().to_string();
+
+        Ok(FtpUrl {
+            host,
+            port,
+            username,
+            password,
+            path,
+        })
+    }
+
+    /// 从路径中提取文件名
+    ///
+    /// - `"/pub/file.zip"` -> `"file.zip"`
+    /// - `"/"` -> `"download"`
+    /// - `"file.txt"` -> `"file.txt"`
+    fn extract_filename_from_path(path: &str) -> String {
+        path.rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("download")
+            .to_string()
     }
 }
 
@@ -149,20 +297,91 @@ impl Default for FtpClient {
     }
 }
 
+/// FTP URL 解析结果
+#[derive(Debug)]
+struct FtpUrl {
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    path: String,
+}
+
 impl Protocol for FtpClient {
-    async fn probe(&self, _url: &str) -> QfResult<FileMetadata> {
-        // FTP URL 格式: ftp://user:pass@host:port/path
-        // 后续实现:解析 URL -> 连接 -> 登录 -> SIZE/MLST
-        Err(QfError::Protocol("FTP 传输尚未完全实现".into()))
+    /// 探测 FTP 文件元数据
+    ///
+    /// 完整流程: 解析 URL -> 连接 -> 登录 -> SIZE -> 构造 FileMetadata -> 断开。
+    /// 使用 URL 中的用户名/密码,未指定时以 anonymous 身份登录。
+    async fn probe(&self, url: &str) -> QfResult<FileMetadata> {
+        let info = Self::parse_ftp_url(url)?;
+
+        // 建立连接
+        self.connect(&info.host, info.port).await?;
+
+        // 登录(使用 URL 中的凭据或匿名登录)
+        if let Err(e) = self.login(&info.username, &info.password).await {
+            self.disconnect().await;
+            return Err(e);
+        }
+
+        // 获取文件大小
+        let size_result = self.file_size(&info.path).await;
+
+        // 断开连接(无论成功或失败)
+        self.disconnect().await;
+
+        let file_size = Some(size_result?);
+
+        Ok(FileMetadata {
+            file_name: Self::extract_filename_from_path(&info.path),
+            file_size,
+            content_type: None,
+            supports_range: false, // FTP 不原生支持 Range 请求
+            etag: None,
+            last_modified: None,
+        })
     }
 
-    async fn download_range(&self, _url: &str, _start: u64, _end: u64) -> QfResult<Bytes> {
-        // FTP Range 下载需要 REST 命令支持
-        Err(QfError::Protocol("FTP 传输尚未完全实现".into()))
+    /// 按字节范围下载文件
+    ///
+    /// FTP 不原生支持 Range 请求,此方法先下载完整文件再切片。
+    /// `start` 和 `end` 均为闭区间字节偏移。
+    async fn download_range(&self, url: &str, start: u64, end: u64) -> QfResult<Bytes> {
+        let full = self.download_full(url).await?;
+
+        let start = start as usize;
+        let end = (end as usize).saturating_add(1); // 闭区间 -> 半开区间
+
+        if start >= full.len() {
+            return Err(QfError::Protocol(format!(
+                "Range 起始位置 {} 超出文件大小 {}",
+                start,
+                full.len()
+            )));
+        }
+
+        let end = end.min(full.len());
+        Ok(full.slice(start..end))
     }
 
-    async fn download_full(&self, _url: &str) -> QfResult<Bytes> {
-        Err(QfError::Protocol("FTP 传输尚未完全实现".into()))
+    /// 下载整个 FTP 文件
+    ///
+    /// 完整流程: 解析 URL -> 连接 -> 登录 -> 设置 Binary 模式 -> RETR -> 断开。
+    async fn download_full(&self, url: &str) -> QfResult<Bytes> {
+        let info = Self::parse_ftp_url(url)?;
+
+        self.connect(&info.host, info.port).await?;
+
+        if let Err(e) = self.login(&info.username, &info.password).await {
+            self.disconnect().await;
+            return Err(e);
+        }
+
+        let result = self.retrieve(&info.path).await;
+
+        self.disconnect().await;
+
+        result
     }
 }
 
@@ -170,138 +389,419 @@ impl Protocol for FtpClient {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_ftp_client_creation() {
+    // =========================================================================
+    // 辅助方法:允许测试直接设置内部状态,无需实际网络连接
+    // =========================================================================
+
+    impl FtpClient {
+        /// [仅测试] 直接将状态设为 Connected,跳过真实 TCP 连接
+        async fn set_connected_for_test(&self, host: &str, port: u16) {
+            let mut guard = self.inner.lock().await;
+            guard.state = FtpState::Connected;
+            guard.host = host.to_string();
+            guard.port = port;
+        }
+
+        /// [仅测试] 直接将状态设为 Authenticated,跳过真实连接和登录
+        async fn set_authenticated_for_test(&self, host: &str, port: u16, user: &str) {
+            let mut guard = self.inner.lock().await;
+            guard.state = FtpState::Authenticated;
+            guard.host = host.to_string();
+            guard.port = port;
+            guard.username = Some(user.to_string());
+        }
+
+        /// [仅测试] 直接将状态设为 Disconnected,重置所有字段
+        async fn set_disconnected_for_test(&self) {
+            let mut guard = self.inner.lock().await;
+            guard.state = FtpState::Disconnected;
+            guard.stream = None;
+            guard.host = String::new();
+            guard.port = 0;
+            guard.username = None;
+        }
+    }
+
+    // =========================================================================
+    // 1. 客户端创建与初始状态
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_ftp_client_creation() {
         let client = FtpClient::new();
-        assert!(!client.is_connected(), "新客户端不应处于已连接状态");
-        assert!(!client.is_authenticated(), "新客户端不应处于已认证状态");
-        assert!(client.host().is_none());
-        assert!(client.port().is_none());
-        assert!(client.username().is_none());
+        assert!(!client.is_connected().await, "新客户端不应处于已连接状态");
+        assert!(
+            !client.is_authenticated().await,
+            "新客户端不应处于已认证状态"
+        );
+        assert_eq!(client.host().await, "");
+        assert_eq!(client.port().await, 0);
+        assert!(client.username().await.is_none());
     }
 
-    #[test]
-    fn test_ftp_client_default() {
+    #[tokio::test]
+    async fn test_ftp_client_default() {
         let client = FtpClient::default();
-        assert!(!client.is_connected());
+        assert!(!client.is_connected().await);
+        assert_eq!(client.host().await, "");
     }
 
-    #[tokio::test]
-    async fn test_ftp_connect_sets_state() {
-        let mut client = FtpClient::new();
-        client.connect("ftp.example.com", 21).await.unwrap();
-        assert!(client.is_connected());
-        assert!(!client.is_authenticated());
-        assert_eq!(client.host(), Some("ftp.example.com"));
-        assert_eq!(client.port(), Some(21));
-    }
-
-    #[tokio::test]
-    async fn test_ftp_login_after_connect() {
-        let mut client = FtpClient::new();
-        client.connect("ftp.example.com", 21).await.unwrap();
-        client.login("anonymous", "guest@").await.unwrap();
-        assert!(client.is_authenticated());
-        assert_eq!(client.username(), Some("anonymous"));
-    }
+    // =========================================================================
+    // 2. 未连接/未认证时调用方法返回正确错误
+    // =========================================================================
 
     #[tokio::test]
     async fn test_ftp_login_without_connect_fails() {
-        let mut client = FtpClient::new();
+        let client = FtpClient::new();
+        let result = client.login("user", "pass").await;
+        assert!(result.is_err(), "未连接时登录应失败");
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("FTP 未连接"),
+            "错误应提示未连接状态"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ftp_file_size_without_stream_fails() {
+        let client = FtpClient::new();
+        // 设置为 Authenticated 但无 FtpStream
+        client
+            .set_authenticated_for_test("ftp.test.com", 21, "user")
+            .await;
+
+        let result = client.file_size("/file.zip").await;
+        assert!(result.is_err(), "无流时 file_size 应失败");
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("FTP 未连接"),
+            "错误应包含 FTP 未连接提示,实际: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ftp_retrieve_without_stream_fails() {
+        let client = FtpClient::new();
+        client
+            .set_authenticated_for_test("ftp.test.com", 21, "user")
+            .await;
+
+        let result = client.retrieve("/file.zip").await;
+        assert!(result.is_err(), "无流时 retrieve 应失败");
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("FTP 未连接"),
+            "错误应包含 FTP 未连接提示,实际: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ftp_login_on_disconnected_state_fails() {
+        let client = FtpClient::new();
+        client.set_disconnected_for_test().await;
+
         let result = client.login("user", "pass").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("FTP 未连接"));
-    }
-
-    #[tokio::test]
-    async fn test_ftp_file_size_without_auth_fails() {
-        let mut client = FtpClient::new();
-        client.connect("ftp.example.com", 21).await.unwrap();
-        let result = client.file_size("/path/file.zip").await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("FTP 未登录"));
-    }
-
-    #[tokio::test]
-    async fn test_ftp_retrieve_without_auth_fails() {
-        let mut client = FtpClient::new();
-        client.connect("ftp.example.com", 21).await.unwrap();
-        let result = client.retrieve("/path/file.zip").await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_ftp_probe_returns_not_implemented() {
-        let client = FtpClient::new();
-        let result = client.probe("ftp://example.com/file.zip").await;
-        assert!(result.is_err());
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("FTP 传输尚未完全实现")
+            result.unwrap_err().to_string().contains("FTP 未连接"),
+            "Disconnected 状态登录应返回未连接错误"
         );
     }
 
-    #[tokio::test]
-    async fn test_ftp_download_range_returns_not_implemented() {
-        let client = FtpClient::new();
-        let result = client
-            .download_range("ftp://example.com/file.zip", 0, 1023)
-            .await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("FTP 传输尚未完全实现")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_ftp_download_full_returns_not_implemented() {
-        let client = FtpClient::new();
-        let result = client.download_full("ftp://example.com/file.zip").await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("FTP 传输尚未完全实现")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_ftp_disconnect_resets_state() {
-        let mut client = FtpClient::new();
-        client.connect("ftp.example.com", 21).await.unwrap();
-        client.login("user", "pass").await.unwrap();
-        assert!(client.is_authenticated());
-
-        client.disconnect();
-        assert!(!client.is_connected());
-        assert!(!client.is_authenticated());
-        assert!(client.host().is_none());
-    }
+    // =========================================================================
+    // 3. 状态转换逻辑
+    // =========================================================================
 
     #[tokio::test]
     async fn test_ftp_state_transitions() {
-        let mut client = FtpClient::new();
+        let client = FtpClient::new();
+
+        // 初始: Disconnected
+        assert!(!client.is_connected().await);
+        assert!(!client.is_authenticated().await);
 
         // Disconnected -> Connected
-        assert!(!client.is_connected());
-        client.connect("ftp.example.com", 21).await.unwrap();
-        assert!(client.is_connected());
-        assert!(!client.is_authenticated());
+        client.set_connected_for_test("ftp.example.com", 21).await;
+        assert!(client.is_connected().await);
+        assert!(!client.is_authenticated().await);
 
         // Connected -> Authenticated
-        client.login("admin", "secret").await.unwrap();
-        assert!(client.is_connected());
-        assert!(client.is_authenticated());
+        client
+            .set_authenticated_for_test("ftp.example.com", 21, "admin")
+            .await;
+        assert!(client.is_connected().await);
+        assert!(client.is_authenticated().await);
 
         // Authenticated -> Disconnected
-        client.disconnect();
-        assert!(!client.is_connected());
-        assert!(!client.is_authenticated());
+        client.set_disconnected_for_test().await;
+        assert!(!client.is_connected().await);
+        assert!(!client.is_authenticated().await);
+    }
+
+    #[tokio::test]
+    async fn test_ftp_disconnect_resets_all_fields() {
+        let client = FtpClient::new();
+        client
+            .set_authenticated_for_test("ftp.example.com", 21, "admin")
+            .await;
+
+        assert_eq!(client.host().await, "ftp.example.com");
+        assert_eq!(client.port().await, 21);
+        assert_eq!(client.username().await.as_deref(), Some("admin"));
+
+        // disconnect() 需要真实流才能发送 QUIT,这里直接用 set_disconnected_for_test
+        client.set_disconnected_for_test().await;
+
+        assert_eq!(client.host().await, "");
+        assert_eq!(client.port().await, 0);
+        assert!(client.username().await.is_none());
+        assert!(!client.is_connected().await);
+    }
+
+    #[tokio::test]
+    async fn test_ftp_connect_sets_host_and_port() {
+        let client = FtpClient::new();
+        client.set_connected_for_test("ftp.test.com", 2121).await;
+
+        assert_eq!(client.host().await, "ftp.test.com");
+        assert_eq!(client.port().await, 2121);
+        assert!(client.is_connected().await);
+        assert!(!client.is_authenticated().await);
+    }
+
+    // =========================================================================
+    // 4. FTP URL 解析
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_ftp_url_parsing_full() {
+        let info = FtpClient::parse_ftp_url("ftp://admin:secret@ftp.example.com:2121/pub/file.zip")
+            .unwrap();
+        assert_eq!(info.host, "ftp.example.com");
+        assert_eq!(info.port, 2121);
+        assert_eq!(info.username, "admin");
+        assert_eq!(info.password, "secret");
+        assert_eq!(info.path, "/pub/file.zip");
+    }
+
+    #[tokio::test]
+    async fn test_ftp_url_parsing_defaults() {
+        let info = FtpClient::parse_ftp_url("ftp://ftp.example.com/path/file.txt").unwrap();
+        assert_eq!(info.host, "ftp.example.com");
+        assert_eq!(info.port, 21, "未指定端口应默认为 21");
+        assert_eq!(info.username, "anonymous", "未指定用户名应默认为 anonymous");
+        assert_eq!(
+            info.password, "anonymous@quantumfetch",
+            "未指定密码应使用默认值"
+        );
+        assert_eq!(info.path, "/path/file.txt");
+    }
+
+    #[tokio::test]
+    async fn test_ftp_url_parsing_with_user_no_password() {
+        let info = FtpClient::parse_ftp_url("ftp://myuser@ftp.example.com/file.bin").unwrap();
+        assert_eq!(info.username, "myuser");
+        assert_eq!(
+            info.password, "anonymous@quantumfetch",
+            "有用户名但无密码时应使用默认密码"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ftp_url_parsing_root_path() {
+        let info = FtpClient::parse_ftp_url("ftp://ftp.example.com/").unwrap();
+        assert_eq!(info.path, "/");
+    }
+
+    #[tokio::test]
+    async fn test_ftp_url_parse_invalid_scheme() {
+        let result = FtpClient::parse_ftp_url("http://example.com/file.zip");
+        assert!(result.is_err(), "非 ftp:// 方案应返回错误");
+        assert!(
+            result.unwrap_err().to_string().contains("URL 方案不是 ftp"),
+            "错误应提示方案不正确"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ftp_url_parse_no_host() {
+        // ftp:// 无主机名时,url crate 返回 EmptyHost 错误
+        let result = FtpClient::parse_ftp_url("ftp://");
+        assert!(result.is_err(), "缺少主机名应返回错误");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("FTP URL 解析失败"),
+            "错误应提示 URL 解析失败,实际: {msg}"
+        );
+    }
+
+    // =========================================================================
+    // 5. Protocol trait 一致性
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_ftp_protocol_probe_returns_error_for_unreachable() {
+        let client = FtpClient::new();
+        // 不可达地址,应返回 Network 错误
+        let result = client.probe("ftp://127.0.0.1:1/file.zip").await;
+        assert!(result.is_err(), "不可达服务器 probe 应返回错误");
+    }
+
+    #[tokio::test]
+    async fn test_ftp_protocol_download_range_returns_error_for_unreachable() {
+        let client = FtpClient::new();
+        let result = client
+            .download_range("ftp://127.0.0.1:1/file.zip", 0, 1023)
+            .await;
+        assert!(result.is_err(), "不可达服务器 download_range 应返回错误");
+    }
+
+    #[tokio::test]
+    async fn test_ftp_protocol_download_full_returns_error_for_unreachable() {
+        let client = FtpClient::new();
+        let result = client.download_full("ftp://127.0.0.1:1/file.zip").await;
+        assert!(result.is_err(), "不可达服务器 download_full 应返回错误");
+    }
+
+    // =========================================================================
+    // 6. 文件名从路径提取
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_extract_filename_from_path() {
+        assert_eq!(
+            FtpClient::extract_filename_from_path("/pub/archives/file.zip"),
+            "file.zip"
+        );
+        assert_eq!(
+            FtpClient::extract_filename_from_path("/file.tar.gz"),
+            "file.tar.gz"
+        );
+        assert_eq!(
+            FtpClient::extract_filename_from_path("file.txt"),
+            "file.txt",
+            "无斜杠路径应返回完整文件名"
+        );
+        assert_eq!(
+            FtpClient::extract_filename_from_path("/"),
+            "download",
+            "空文件名应回退为 'download'"
+        );
+        assert_eq!(
+            FtpClient::extract_filename_from_path(""),
+            "download",
+            "空路径应回退为 'download'"
+        );
+    }
+
+    // =========================================================================
+    // 7. 文件大小格式化
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_file_size_formatting_in_error_message() {
+        // 验证 Protocol 方法在不可达地址上生成包含有意义上下文的错误消息
+        let client = FtpClient::new();
+        let result = client.probe("ftp://127.0.0.1:1/large-file.bin").await;
+        assert!(result.is_err());
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            !err_msg.is_empty(),
+            "错误消息不应为空,应包含有用的上下文信息"
+        );
+    }
+
+    // =========================================================================
+    // 8. 错误消息包含有用上下文
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_error_message_login_without_connect() {
+        let client = FtpClient::new();
+        let err = client.login("user", "pass").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("FTP 未连接"), "错误应包含状态信息: {msg}");
+        assert!(msg.contains("connect()"), "错误应包含修复建议: {msg}");
+    }
+
+    #[tokio::test]
+    async fn test_error_message_file_size_without_stream() {
+        let client = FtpClient::new();
+        client
+            .set_authenticated_for_test("ftp.test.com", 21, "user")
+            .await;
+
+        let err = client.file_size("/missing.txt").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("FTP 未连接"),
+            "file_size 无流错误应包含未连接提示: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_error_message_retrieve_without_stream() {
+        let client = FtpClient::new();
+        client
+            .set_authenticated_for_test("ftp.test.com", 21, "user")
+            .await;
+
+        let err = client.retrieve("/missing.txt").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("FTP 未连接"),
+            "retrieve 无流错误应包含未连接提示: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_error_message_invalid_url_scheme() {
+        let err = FtpClient::parse_ftp_url("http://example.com/file.zip").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("URL 方案不是 ftp"),
+            "错误应指明方案不正确: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_error_message_missing_host() {
+        let err = FtpClient::parse_ftp_url("ftp://").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("FTP URL 解析失败"),
+            "空主机名错误应包含解析失败信息: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_error_message_connect_unreachable() {
+        // 使用 localhost 不可达端口,验证连接错误包含地址信息
+        let client = FtpClient::new();
+        let result = client.connect("127.0.0.1", 1).await;
+        assert!(result.is_err());
+
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("FTP 连接失败"),
+            "连接错误应包含 'FTP 连接失败' 前缀: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_error_message_probe_invalid_url() {
+        let client = FtpClient::new();
+        let result = client.probe("not-a-url").await;
+        assert!(result.is_err());
+
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("FTP URL 解析失败"),
+            "URL 解析错误应包含上下文: {msg}"
+        );
     }
 }
