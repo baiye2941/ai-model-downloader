@@ -39,11 +39,7 @@ impl HttpClient {
     }
 }
 
-impl Default for HttpClient {
-    fn default() -> Self {
-        Self::new().expect("创建默认 HTTP 客户端失败")
-    }
-}
+// Default 实现已移除 — TLS 初始化可能失败,请使用 HttpClient::new()
 
 impl Protocol for HttpClient {
     async fn probe(&self, url: &str) -> QfResult<FileMetadata> {
@@ -104,7 +100,12 @@ impl Protocol for HttpClient {
             .map_err(|e| QfError::Network(format!("Range 请求失败: {e}")))?;
 
         let status = response.status();
-        if !status.is_success() && status.as_u16() != 206 {
+        if status == reqwest::StatusCode::OK {
+            return Err(QfError::Protocol(
+                "服务器忽略 Range 头,返回 HTTP 200(不支持分片下载)".into(),
+            ));
+        }
+        if status != reqwest::StatusCode::PARTIAL_CONTENT {
             return Err(QfError::Protocol(format!("HTTP {status}")));
         }
 
@@ -220,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn test_http_client_default() {
-        let _client = HttpClient::default();
+    fn test_http_client_new() {
+        let _client = HttpClient::new().unwrap();
     }
 }

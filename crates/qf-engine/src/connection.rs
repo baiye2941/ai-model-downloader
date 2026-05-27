@@ -60,12 +60,12 @@ impl ConnectionPool {
             .clone()
             .acquire_owned()
             .await
-            .expect("全局连接信号量已关闭");
+            .unwrap_or_else(|_| panic!("全局连接信号量已关闭"));
         let host_sem = self.host_semaphore(host).await;
         let host_permit = host_sem
             .acquire_owned()
             .await
-            .expect("主机连接信号量已关闭");
+            .unwrap_or_else(|_| panic!("主机连接信号量已关闭"));
         self.active_count.fetch_add(1, Ordering::Relaxed);
         ConnectionPermit {
             _global_permit: global_permit,

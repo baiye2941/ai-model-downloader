@@ -70,15 +70,10 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 /// 根据数据大小自动选择最优校验算法
-pub fn auto_select_verifier(data_size: u64) -> CpuVerifier {
-    // 对于小数据,blake3 和 sha256 差异不大,默认用 blake3
-    // 对于大数据,blake3 显著快于 sha256
-    if data_size > 64 * 1024 * 1024 {
-        // > 64MB,blake3 优势明显
-        CpuVerifier::blake3()
-    } else {
-        CpuVerifier::blake3()
-    }
+///
+/// Blake3 在所有大小下都优于 SHA-256,因此默认使用 Blake3。
+pub fn auto_select_verifier(_data_size: u64) -> CpuVerifier {
+    CpuVerifier::blake3()
 }
 
 #[cfg(test)]

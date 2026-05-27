@@ -31,7 +31,7 @@ pub struct ScheduledTask {
 
 impl PartialEq for ScheduledTask {
     fn eq(&self, other: &Self) -> bool {
-        self.task_id == other.task_id
+        self.cmp(other) == Ordering::Equal
     }
 }
 
@@ -45,7 +45,7 @@ impl PartialOrd for ScheduledTask {
 
 impl Ord for ScheduledTask {
     fn cmp(&self, other: &Self) -> Ordering {
-        // 按优先级 -> 进度(即将完成优先) -> 文件大小(小文件优先)排序
+        // 按优先级 -> 进度(即将完成优先) -> 文件大小(小文件优先) -> task_id(稳定性)
         self.priority
             .cmp(&other.priority)
             .then_with(|| {
@@ -54,6 +54,7 @@ impl Ord for ScheduledTask {
                     .unwrap_or(Ordering::Equal)
             })
             .then_with(|| other.file_size.cmp(&self.file_size))
+            .then_with(|| self.task_id.cmp(&other.task_id))
     }
 }
 

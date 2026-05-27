@@ -40,12 +40,12 @@ impl HoltWintersPredictor {
         self.level = new_level;
     }
 
-    /// 预测未来第 steps 步的带宽
+    /// 预测未来第 steps 步的带宽(不会返回负值)
     pub fn predict(&self, steps: u64) -> f64 {
         if !self.initialized {
             return 0.0;
         }
-        self.level + self.trend * steps as f64
+        (self.level + self.trend * steps as f64).max(0.0)
     }
 
     /// 当前水平估计

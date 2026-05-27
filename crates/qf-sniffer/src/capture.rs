@@ -44,7 +44,12 @@ impl Default for CaptureConfig {
 
 /// 根据文件扩展名识别资源类型
 pub fn identify_resource(url: &str) -> ResourceType {
-    let lower = url.to_lowercase();
+    // 剥离 query 参数和 fragment,只取路径部分
+    let path = url::Url::parse(url)
+        .ok()
+        .map(|u| u.path().to_string())
+        .unwrap_or_else(|| url.split('?').next().unwrap_or(url).to_string());
+    let lower = path.to_lowercase();
     let ext = lower.rsplit('.').next().unwrap_or("");
     match ext {
         "mp4" | "webm" | "m3u8" | "flv" | "avi" | "mkv" | "mov" | "ts" => ResourceType::Video,
@@ -157,6 +162,26 @@ mod tests {
         assert_eq!(
             identify_resource("http://example.com/VIDEO.MP4"),
             ResourceType::Video
+        );
+    }
+
+    #[test]
+    fn test_url_with_query_params() {
+        assert_eq!(
+            identify_resource("http://example.com/file.zip?token=abc&v=2"),
+            ResourceType::Archive
+        );
+        assert_eq!(
+            identify_resource("http://cdn.example.com/video.mp4?dl=1"),
+            ResourceType::Video
+        );
+    }
+
+    #[test]
+    fn test_url_with_fragment() {
+        assert_eq!(
+            identify_resource("http://example.com/doc.pdf#page=5"),
+            ResourceType::Document
         );
     }
 }

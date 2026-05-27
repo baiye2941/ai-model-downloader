@@ -151,20 +151,22 @@ pub mod harness {
         if fragment_count == 0 || total_size == 0 {
             return Vec::new();
         }
-        let chunk_size = total_size / fragment_count as u64;
-        (0..fragment_count)
+        // 确保每分片至少 1 字节
+        let actual_count = (fragment_count as u64).min(total_size);
+        let chunk_size = total_size / actual_count;
+        let remainder = total_size % actual_count;
+        (0..actual_count as u32)
             .map(|i| {
-                let start = i as u64 * chunk_size;
-                let end = if i == fragment_count - 1 {
-                    total_size - 1
-                } else {
-                    (i as u64 + 1) * chunk_size - 1
-                };
+                let i = i as u64;
+                let extra = if i < remainder { 1 } else { 0 };
+                let start = i * chunk_size + i.min(remainder);
+                let size = chunk_size + extra;
+                let end = start + size - 1;
                 FragmentInfo {
-                    index: i,
+                    index: i as u32,
                     start,
                     end,
-                    size: end - start + 1,
+                    size,
                     downloaded: 0,
                     hash: None,
                 }

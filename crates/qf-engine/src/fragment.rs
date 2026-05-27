@@ -54,31 +54,59 @@ impl FragmentRecord {
         }
     }
 
-    /// 转换到下载中状态
+    /// 转换到下载中状态(仅允许从 Pending 进入)
     pub fn start_download(&mut self) {
+        debug_assert!(
+            self.state == FragmentState::Pending,
+            "非法状态转换: {:?} -> Downloading",
+            self.state
+        );
         self.state = FragmentState::Downloading;
     }
 
-    /// 下载完成,转换到校验状态
+    /// 下载完成,转换到校验状态(仅允许从 Downloading 进入)
     pub fn complete_download(&mut self, data: Bytes, duration: Duration) {
+        debug_assert!(
+            self.state == FragmentState::Downloading,
+            "非法状态转换: {:?} -> Verifying",
+            self.state
+        );
         self.info.downloaded = data.len() as u64;
         self.data = Some(data);
         self.last_duration = Some(duration);
         self.state = FragmentState::Verifying;
     }
 
-    /// 校验通过,转换到写入状态
+    /// 校验通过,转换到写入状态(仅允许从 Verifying 进入)
     pub fn verify_ok(&mut self) {
+        debug_assert!(
+            self.state == FragmentState::Verifying,
+            "非法状态转换: {:?} -> Writing",
+            self.state
+        );
         self.state = FragmentState::Writing;
     }
 
-    /// 写入完成,转换到完成状态
+    /// 写入完成,转换到完成状态(仅允许从 Writing 进入)
     pub fn write_done(&mut self) {
+        debug_assert!(
+            self.state == FragmentState::Writing,
+            "非法状态转换: {:?} -> Done",
+            self.state
+        );
         self.state = FragmentState::Done;
     }
 
-    /// 标记失败,如果可重试则回到 Pending
+    /// 标记失败,如果可重试则回到 Pending(仅允许从 Downloading/Verifying/Writing 进入)
     pub fn mark_failed(&mut self) -> bool {
+        debug_assert!(
+            matches!(
+                self.state,
+                FragmentState::Downloading | FragmentState::Verifying | FragmentState::Writing
+            ),
+            "非法状态转换: {:?} -> Failed/Pending",
+            self.state
+        );
         self.retry_count += 1;
         self.data = None;
         if self.retry_count <= self.max_retries {
@@ -111,6 +139,7 @@ pub struct BandwidthTracker {
     ewma: f64,
     alpha: f64,
     samples: Vec<u64>,
+    max_samples: usize,
 }
 
 impl BandwidthTracker {
@@ -121,11 +150,18 @@ impl BandwidthTracker {
             ewma: 0.0,
             alpha: alpha.clamp(0.0, 1.0),
             samples: Vec::new(),
+            max_samples: 1000,
         }
     }
 
-    /// 记录一个新的带宽样本(字节/秒)
+    /// 记录一个新的带宽样本(字节/秒),跳过零值避免污染 EWMA
     pub fn record(&mut self, bytes_per_sec: u64) {
+        if bytes_per_sec == 0 {
+            return;
+        }
+        if self.samples.len() >= self.max_samples {
+            self.samples.remove(0);
+        }
         self.samples.push(bytes_per_sec);
         if self.samples.len() == 1 {
             self.ewma = bytes_per_sec as f64;
