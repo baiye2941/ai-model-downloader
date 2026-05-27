@@ -29,9 +29,11 @@ pub struct DownloadOrchestrator {
 
 /// 编排器内部的分片跟踪记录
 #[allow(dead_code)]
-struct FragmentRecord {
-    info: FragmentInfo,
-    completed: bool,
+pub struct FragmentRecord {
+    /// 分片信息
+    pub info: FragmentInfo,
+    /// 是否已完成
+    pub completed: bool,
 }
 
 impl DownloadOrchestrator {
@@ -141,6 +143,31 @@ impl DownloadOrchestrator {
         }
         let bytes_per_sec = (bytes as f64 / secs) as u64;
         self.bandwidth.record(bytes_per_sec);
+    }
+
+    /// 注册分片到活跃列表(供上层追踪分片状态)
+    pub fn register_fragment(&mut self, info: FragmentInfo) {
+        self.active_fragments.push(FragmentRecord {
+            info,
+            completed: false,
+        });
+    }
+
+    /// 标记分片完成并更新带宽追踪(供上层在分片下载完成后调用)
+    pub fn on_fragment_complete(&mut self, info: &FragmentInfo, duration: Duration) {
+        self.on_fragment_done(info.size, duration);
+        if let Some(record) = self
+            .active_fragments
+            .iter_mut()
+            .find(|r| r.info.index == info.index)
+        {
+            record.completed = true;
+        }
+    }
+
+    /// 获取活跃分片记录的不可变引用(供上层查询分片状态)
+    pub fn active_fragments(&self) -> &[FragmentRecord] {
+        &self.active_fragments
     }
 
     /// 获取当前带宽估计(字节/秒)

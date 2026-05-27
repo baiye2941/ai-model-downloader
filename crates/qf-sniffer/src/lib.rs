@@ -4,8 +4,11 @@
 //! - 请求拦截与资源类型识别
 //! - 下载链接提取
 //! - 媒体资源捕获
+//! - 嗅探资源管理
 
 pub mod capture;
 pub mod filter;
+pub mod resources;
 
 pub use capture::{CaptureConfig, ResourceType, identify_resource, should_capture};
+pub use resources::{ResourceManager, SnifferResource};

@@ -7,9 +7,11 @@
 //! - 并发控制
 
 pub mod connection;
+pub mod downloader;
 pub mod fragment;
 pub mod orchestrator;
 
 pub use connection::{ConnectionPool, PoolConfig};
+pub use downloader::{DownloadTask, ProtocolKind, StorageKind, VerifierKind};
 pub use fragment::{BandwidthTracker, FragmentRecord, FragmentState};
 pub use orchestrator::DownloadOrchestrator;

@@ -14,10 +14,13 @@ pub mod harness {
     use crate::types::{FileMetadata, FragmentInfo, TaskId};
 
     /// Mock 协议实现,用于测试
+    #[derive(Clone)]
     pub struct MockProtocol {
         metadata: Option<FileMetadata>,
         error_msg: Option<String>,
         pub range_data: Arc<Mutex<HashMap<(u64, u64), Bytes>>>,
+        /// 全量下载数据(download_full 的返回值)
+        default_data: Option<Bytes>,
     }
 
     impl MockProtocol {
@@ -26,6 +29,7 @@ pub mod harness {
                 metadata: Some(metadata),
                 error_msg: None,
                 range_data: Arc::new(Mutex::new(HashMap::new())),
+                default_data: None,
             }
         }
 
@@ -34,11 +38,20 @@ pub mod harness {
             self
         }
 
+        /// 设置全量下载数据(不支持 Range 时使用)
+        pub fn with_default_data(self, data: Bytes) -> Self {
+            Self {
+                default_data: Some(data),
+                ..self
+            }
+        }
+
         pub fn failing(error: QfError) -> Self {
             Self {
                 metadata: None,
                 error_msg: Some(error.to_string()),
                 range_data: Arc::new(Mutex::new(HashMap::new())),
+                default_data: None,
             }
         }
     }
@@ -60,11 +73,14 @@ pub mod harness {
         }
 
         async fn download_full(&self, _url: &str) -> QfResult<Bytes> {
-            Err(QfError::Protocol("不支持全量下载".into()))
+            self.default_data
+                .clone()
+                .ok_or_else(|| QfError::Protocol("不支持全量下载".into()))
         }
     }
 
     /// 内存存储实现,用于测试
+    #[derive(Clone)]
     pub struct MemoryStorage {
         data: Arc<Mutex<Vec<u8>>>,
     }

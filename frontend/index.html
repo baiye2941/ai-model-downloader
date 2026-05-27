@@ -196,6 +196,15 @@
       background: rgba(239, 68, 68, 0.12);
       color: var(--error);
     }
+    .status-pending {
+      background: rgba(136, 136, 160, 0.12);
+      color: var(--text-secondary);
+    }
+    .status-cancelled {
+      background: rgba(136, 136, 160, 0.12);
+      color: var(--text-muted);
+      text-decoration: line-through;
+    }
 
     /* 进度条 */
     .progress-bar {
@@ -374,6 +383,34 @@
     .btn-sm { padding: 6px 12px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; font-weight: 600; }
     .btn-download-sm { background: var(--accent); color: white; }
     .btn-download-sm:hover { background: var(--accent-hover); }
+
+    /* 任务操作按钮 */
+    .card-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .btn-card-action {
+      padding: 4px 10px;
+      font-size: 11px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+    .btn-card-action:hover {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      border-color: #353560;
+    }
+    .btn-card-action.action-danger:hover {
+      background: rgba(239, 68, 68, 0.12);
+      color: var(--error);
+      border-color: rgba(239, 68, 68, 0.3);
+    }
 
     /* 分片进度 */
     .fragment-grid {
@@ -569,66 +606,167 @@
   </div>
 
   <script>
-    // 模拟下载数据
-    const downloads = [
-      {
-        id: '1',
-        name: 'ubuntu-24.04-desktop-amd64.iso',
-        ext: 'ISO',
-        url: 'https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso',
-        size: 5894578176,
-        downloaded: 3456789012,
-        speed: 25165824,
-        status: 'downloading',
-        fragments: 16,
-        fragmentsDone: 9,
-        protocol: 'HTTPS',
-      },
-      {
-        id: '2',
-        name: 'rust-1.78.0-x86_64-pc-windows-msvc.msi',
-        ext: 'MSI',
-        url: 'https://static.rust-lang.org/dist/rust-1.78.0-x86_64-pc-windows-msvc.msi',
-        size: 234567890,
-        downloaded: 234567890,
-        speed: 0,
-        status: 'completed',
-        fragments: 4,
-        fragmentsDone: 4,
-        protocol: 'HTTPS',
-      },
-      {
-        id: '3',
-        name: 'node-v22.0.0-x64.zip',
-        ext: 'ZIP',
-        url: 'https://nodejs.org/dist/v22.0.0/node-v22.0.0-win-x64.zip',
-        size: 31457280,
-        downloaded: 18874368,
-        speed: 4194304,
-        status: 'downloading',
-        fragments: 4,
-        fragmentsDone: 2,
-        protocol: 'HTTP/2',
-      },
-      {
-        id: '4',
-        name: 'docker-desktop-installer.exe',
-        ext: 'EXE',
-        url: 'https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe',
-        size: 524288000,
-        downloaded: 524288000,
-        speed: 0,
-        status: 'completed',
-        fragments: 8,
-        fragmentsDone: 8,
-        protocol: 'QUIC',
-      },
-    ];
+    // ======================================================================
+    // Tauri API 桥接层 - 自动检测环境
+    // ======================================================================
 
+    const isTauri = window.__TAURI__ !== undefined;
+
+    /**
+     * 调用 Tauri 后端命令。
+     * Tauri 环境下调用真实命令,浏览器环境下返回模拟数据。
+     */
+    async function invoke(cmd, args = {}) {
+      if (isTauri) {
+        return await window.__TAURI__.core.invoke(cmd, args);
+      }
+      return mockInvoke(cmd, args);
+    }
+
+    // ======================================================================
+    // 浏览器预览模拟层 (mockInvoke)
+    // ======================================================================
+
+    /** 模拟任务存储 */
+    let mockTasks = [];
+    /** 模拟 UUID 计数器 */
+    let mockIdCounter = 1;
+
+    /** 从 URL 提取文件名 */
+    function extractFileName(url) {
+      try {
+        const u = new URL(url);
+        const seg = u.pathname.split('/').pop();
+        return seg || 'unknown';
+      } catch {
+        return 'unknown';
+      }
+    }
+
+    /** 从文件名提取扩展名 */
+    function guessExt(name) {
+      const parts = name.split('.');
+      return parts.length > 1 ? parts.pop().toUpperCase().slice(0, 4) : 'FILE';
+    }
+
+    /**
+     * 模拟 Tauri 命令调用 - 仅在非 Tauri 浏览器环境下使用。
+     * 复刻后端 commands.rs 的业务逻辑。
+     */
+    async function mockInvoke(cmd, args = {}) {
+      switch (cmd) {
+        case 'get_app_info':
+          return { version: '0.1.0', name: 'QuantumFetch' };
+
+        case 'supported_protocols':
+          return ['HTTP', 'HTTPS', 'FTP', 'QUIC'];
+
+        case 'create_task': {
+          const id = 'mock-' + String(mockIdCounter++).padStart(4, '0');
+          mockTasks.push({
+            id,
+            url: args.url,
+            file_name: extractFileName(args.url),
+            file_size: 0,
+            downloaded: 0,
+            speed: 0,
+            status: 'pending',
+            progress: 0.0,
+            fragments_total: 0,
+            fragments_done: 0,
+            created_at: new Date().toISOString(),
+          });
+          return id;
+        }
+
+        case 'get_task_list':
+          return [...mockTasks];
+
+        case 'get_task_detail': {
+          const t = mockTasks.find(t => t.id === args.taskId);
+          if (!t) throw new Error('任务不存在: ' + args.taskId);
+          return { ...t };
+        }
+
+        case 'pause_task': {
+          const t = mockTasks.find(t => t.id === args.taskId);
+          if (!t) throw new Error('任务不存在: ' + args.taskId);
+          if (t.status === 'pending' || t.status === 'downloading') {
+            t.status = 'paused';
+            t.speed = 0;
+          } else {
+            throw new Error("当前状态 '" + t.status + "' 不允许暂停");
+          }
+          return null;
+        }
+
+        case 'resume_task': {
+          const t = mockTasks.find(t => t.id === args.taskId);
+          if (!t) throw new Error('任务不存在: ' + args.taskId);
+          if (t.status === 'paused') {
+            t.status = 'downloading';
+          } else {
+            throw new Error("仅暂停状态可恢复,当前状态: '" + t.status + "'");
+          }
+          return null;
+        }
+
+        case 'cancel_task': {
+          const t = mockTasks.find(t => t.id === args.taskId);
+          if (!t) throw new Error('任务不存在: ' + args.taskId);
+          if (t.status === 'completed' || t.status === 'cancelled') {
+            throw new Error('任务已' + t.status + ',无法取消');
+          }
+          t.status = 'cancelled';
+          t.speed = 0;
+          return null;
+        }
+
+        case 'delete_task': {
+          const idx = mockTasks.findIndex(t => t.id === args.taskId);
+          if (idx === -1) throw new Error('任务不存在: ' + args.taskId);
+          const t = mockTasks[idx];
+          if (t.status === 'completed' || t.status === 'cancelled' || t.status === 'failed') {
+            mockTasks.splice(idx, 1);
+          } else {
+            throw new Error("当前状态 '" + t.status + "' 不允许删除,请先取消任务");
+          }
+          return null;
+        }
+
+        case 'get_config':
+          return {
+            download_dir: 'C:\\Users\\Downloads',
+            max_concurrent_tasks: 5,
+            max_concurrent_fragments: 16,
+            max_connections_per_host: 16,
+            enable_quic: false,
+            verify_checksum: true,
+          };
+
+        case 'update_config':
+          // 模拟保存成功
+          return null;
+
+        default:
+          console.warn('未知命令:', cmd);
+          return null;
+      }
+    }
+
+    // ======================================================================
+    // 下载数据与状态
+    // ======================================================================
+
+    const downloads = [];
     let selectedId = null;
 
+    // ======================================================================
+    // 格式化工具
+    // ======================================================================
+
     function formatSize(bytes) {
-      if (bytes === 0) return '0 B';
+      if (!bytes || bytes === 0) return '0 B';
       const k = 1024;
       const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
       const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -643,10 +781,52 @@
       return dl.size > 0 ? Math.round((dl.downloaded / dl.size) * 100) : 0;
     }
 
+    /**
+     * 从文件名推断扩展名标签
+     */
+    function guessExtFromName(name) {
+      const parts = name.split('.');
+      return parts.length > 1 ? parts.pop().toUpperCase().slice(0, 4) : 'FILE';
+    }
+
+    /**
+     * 状态码映射为中文文本
+     */
+    function statusText(status) {
+      return {
+        downloading: '下载中',
+        completed: '已完成',
+        paused: '已暂停',
+        failed: '失败',
+        pending: '等待中',
+        cancelled: '已取消',
+      }[status] || status;
+    }
+
+    // ======================================================================
+    // 渲染
+    // ======================================================================
+
     function renderCard(dl) {
       const progress = getProgress(dl);
-      const statusClass = `status-${dl.status}`;
-      const statusText = { downloading: '下载中', completed: '已完成', paused: '已暂停', failed: '失败' }[dl.status];
+      const statusClass = 'status-' + dl.status;
+
+      // 根据任务状态生成操作按钮
+      let actionsHtml = '';
+      if (dl.status === 'downloading' || dl.status === 'pending') {
+        actionsHtml += '<button class="btn-card-action" onclick="event.stopPropagation(); taskPause(\'' + dl.id + '\')">暂停</button>';
+      } else if (dl.status === 'paused') {
+        actionsHtml += '<button class="btn-card-action" onclick="event.stopPropagation(); taskResume(\'' + dl.id + '\')">恢复</button>';
+      }
+      // 活跃任务可取消
+      if (dl.status !== 'completed' && dl.status !== 'cancelled') {
+        actionsHtml += '<button class="btn-card-action action-danger" onclick="event.stopPropagation(); taskCancel(\'' + dl.id + '\')">取消</button>';
+      }
+      // 非活跃任务可删除
+      if (dl.status === 'completed' || dl.status === 'cancelled' || dl.status === 'failed') {
+        actionsHtml += '<button class="btn-card-action action-danger" onclick="event.stopPropagation(); taskDelete(\'' + dl.id + '\')">删除</button>';
+      }
+
       return `
         <div class="download-card" data-id="${dl.id}" onclick="selectDownload('${dl.id}')">
           <div class="card-header">
@@ -654,7 +834,7 @@
               ${dl.name}
               <span class="ext">${dl.ext}</span>
             </div>
-            <span class="card-status ${statusClass}">${statusText}</span>
+            <span class="card-status ${statusClass}">${statusText(dl.status)}</span>
           </div>
           <div class="progress-bar">
             <div class="progress-fill ${dl.status}" style="width: ${progress}%"></div>
@@ -668,25 +848,26 @@
               <span class="detail-label">大小</span>
               <span>${formatSize(dl.size)}</span>
             </div>
-            ${dl.speed > 0 ? `<div class="detail-item"><span class="detail-label">速度</span><span class="speed-value">${formatSpeed(dl.speed)}</span></div>` : ''}
+            ${dl.speed > 0 ? '<div class="detail-item"><span class="detail-label">速度</span><span class="speed-value">' + formatSpeed(dl.speed) + '</span></div>' : ''}
             <div class="detail-item">
               <span class="detail-label">分片</span>
               <span>${dl.fragmentsDone}/${dl.fragments}</span>
             </div>
           </div>
+          <div class="card-actions">${actionsHtml}</div>
         </div>
       `;
     }
 
     function renderList() {
-      const active = downloads.filter(d => d.status === 'downloading' || d.status === 'paused');
-      const completed = downloads.filter(d => d.status === 'completed' || d.status === 'failed');
+      const active = downloads.filter(d => d.status === 'downloading' || d.status === 'paused' || d.status === 'pending');
+      const completed = downloads.filter(d => d.status === 'completed' || d.status === 'failed' || d.status === 'cancelled');
       document.getElementById('active-downloads').innerHTML = active.map(renderCard).join('');
       document.getElementById('completed-downloads').innerHTML = completed.map(renderCard).join('');
       document.getElementById('empty-state').style.display = downloads.length === 0 ? 'flex' : 'none';
 
       // 更新侧边栏统计
-      const totalSpeed = active.reduce((sum, d) => sum + d.speed, 0);
+      const totalSpeed = active.reduce((sum, d) => sum + (d.speed || 0), 0);
       document.getElementById('stat-speed').textContent = formatSpeed(totalSpeed);
       document.getElementById('stat-connections').textContent = active.reduce((sum, d) => sum + d.fragmentsDone, 0);
       document.getElementById('stat-queue').textContent = active.length;
@@ -704,7 +885,7 @@
       document.getElementById('panel-speed').textContent = dl.speed > 0 ? formatSpeed(dl.speed) : '--';
       document.getElementById('panel-fragments').textContent = dl.fragments;
       document.getElementById('panel-protocol').textContent = dl.protocol;
-      document.getElementById('panel-status').textContent = { downloading: '下载中', completed: '已完成', paused: '已暂停', failed: '失败' }[dl.status];
+      document.getElementById('panel-status').textContent = statusText(dl.status);
 
       // 分片可视化
       const grid = document.getElementById('fragment-grid');
@@ -721,42 +902,196 @@
       });
     }
 
-    function startDownload() {
+    // ======================================================================
+    // Tauri 命令交互
+    // ======================================================================
+
+    /**
+     * 创建下载任务 - 调用 Tauri create_task 命令
+     */
+    async function startDownload() {
       const url = document.getElementById('url-input').value.trim();
       if (!url) return;
-      const name = url.split('/').pop().split('?')[0] || 'download';
-      const ext = name.split('.').pop().toUpperCase().slice(0, 4) || 'FILE';
-      const id = String(Date.now());
-      downloads.unshift({
-        id, name, ext, url, size: 0, downloaded: 0, speed: 0,
-        status: 'downloading', fragments: 1, fragmentsDone: 0, protocol: 'HTTP',
-      });
-      document.getElementById('url-input').value = '';
-      renderList();
+      try {
+        const taskId = await invoke('create_task', { url });
+        // 刷新任务列表以获取后端最新数据
+        await refreshTaskList();
+        document.getElementById('url-input').value = '';
+      } catch (e) {
+        console.error('创建任务失败:', e);
+      }
     }
 
-    // 事件绑定
-    document.getElementById('btn-download').addEventListener('click', startDownload);
-    document.getElementById('url-input').addEventListener('keydown', e => {
-      if (e.key === 'Enter') startDownload();
-    });
+    /**
+     * 从后端刷新任务列表,同步到前端 downloads 数组
+     */
+    async function refreshTaskList() {
+      try {
+        const tasks = await invoke('get_task_list');
+        // 将后端 TaskInfo 转换为前端格式
+        downloads.length = 0;
+        if (Array.isArray(tasks)) {
+          tasks.forEach(t => {
+            downloads.push({
+              id: t.id,
+              name: t.file_name,
+              ext: guessExtFromName(t.file_name),
+              url: t.url,
+              size: t.file_size || 0,
+              downloaded: t.downloaded || 0,
+              speed: t.speed || 0,
+              status: t.status,
+              fragments: t.fragments_total || 0,
+              fragmentsDone: t.fragments_done || 0,
+              protocol: 'HTTPS',
+            });
+          });
+        }
+        renderList();
+        // 如果当前有选中任务,刷新详情面板
+        if (selectedId) {
+          const exists = downloads.find(d => d.id === selectedId);
+          if (exists) {
+            selectDownload(selectedId);
+          } else {
+            // 选中的任务已被删除,隐藏面板
+            document.getElementById('detail-panel').style.display = 'none';
+            selectedId = null;
+          }
+        }
+      } catch (e) {
+        console.error('刷新任务列表失败:', e);
+      }
+    }
 
-    // 视图切换
-    document.querySelectorAll('.nav-item').forEach(item => {
-      item.addEventListener('click', () => {
-        const view = item.dataset.view;
-        document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
-        item.classList.add('active');
-        document.querySelectorAll('.downloads-view, .sniffer-view, .settings-view').forEach(v => v.classList.remove('active'));
-        document.getElementById(`view-${view}`).classList.add('active');
-        // 顶部栏只在下载视图显示
-        document.querySelector('.topbar').style.display = view === 'downloads' ? 'flex' : 'none';
-        // 详情面板只在下载视图显示
-        if (view !== 'downloads') document.getElementById('detail-panel').style.display = 'none';
-      });
-    });
+    /**
+     * 暂停任务
+     */
+    async function taskPause(taskId) {
+      try {
+        await invoke('pause_task', { taskId });
+        await refreshTaskList();
+      } catch (e) {
+        console.error('暂停任务失败:', e);
+      }
+    }
 
-    // 嗅探面板模拟数据
+    /**
+     * 恢复任务
+     */
+    async function taskResume(taskId) {
+      try {
+        await invoke('resume_task', { taskId });
+        await refreshTaskList();
+      } catch (e) {
+        console.error('恢复任务失败:', e);
+      }
+    }
+
+    /**
+     * 取消任务
+     */
+    async function taskCancel(taskId) {
+      try {
+        await invoke('cancel_task', { taskId });
+        await refreshTaskList();
+      } catch (e) {
+        console.error('取消任务失败:', e);
+      }
+    }
+
+    /**
+     * 删除任务
+     */
+    async function taskDelete(taskId) {
+      try {
+        await invoke('delete_task', { taskId });
+        await refreshTaskList();
+      } catch (e) {
+        console.error('删除任务失败:', e);
+      }
+    }
+
+    /**
+     * 全部暂停 - 暂停所有活跃任务
+     */
+    async function pauseAll() {
+      const active = downloads.filter(d => d.status === 'downloading' || d.status === 'pending');
+      for (const dl of active) {
+        try {
+          await invoke('pause_task', { taskId: dl.id });
+        } catch (e) {
+          console.error('暂停任务 ' + dl.id + ' 失败:', e);
+        }
+      }
+      await refreshTaskList();
+    }
+
+    // ======================================================================
+    // 设置面板
+    // ======================================================================
+
+    /**
+     * 从后端加载配置并填充设置面板
+     */
+    async function loadSettings() {
+      try {
+        const config = await invoke('get_config');
+        document.getElementById('cfg-download-dir').value = config.download_dir || '';
+        document.getElementById('cfg-max-tasks').value = config.max_concurrent_tasks || 5;
+        document.getElementById('cfg-max-fragments').value = config.max_concurrent_fragments || 16;
+        document.getElementById('cfg-max-connections').value = config.max_connections_per_host || 16;
+        // 开关状态
+        setToggle('cfg-quic', config.enable_quic);
+        setToggle('cfg-verify', config.verify_checksum);
+      } catch (e) {
+        console.error('加载设置失败:', e);
+      }
+    }
+
+    /**
+     * 收集设置面板的值并保存到后端
+     */
+    async function saveSettings() {
+      const config = {
+        download_dir: document.getElementById('cfg-download-dir').value,
+        max_concurrent_tasks: parseInt(document.getElementById('cfg-max-tasks').value) || 5,
+        max_concurrent_fragments: parseInt(document.getElementById('cfg-max-fragments').value) || 16,
+        max_connections_per_host: parseInt(document.getElementById('cfg-max-connections').value) || 16,
+        enable_quic: getToggle('cfg-quic'),
+        verify_checksum: getToggle('cfg-verify'),
+      };
+      try {
+        await invoke('update_config', { config });
+        // 保存成功的视觉反馈
+        const btn = event.target;
+        btn.textContent = '已保存';
+        btn.style.background = '#22c55e';
+        setTimeout(() => { btn.textContent = '保存设置'; btn.style.background = ''; }, 1500);
+      } catch (e) {
+        console.error('保存设置失败:', e);
+      }
+    }
+
+    /** 设置 toggle 开关状态 */
+    function setToggle(id, value) {
+      const el = document.getElementById(id);
+      if (value) {
+        el.classList.add('on');
+      } else {
+        el.classList.remove('on');
+      }
+    }
+
+    /** 获取 toggle 开关状态 */
+    function getToggle(id) {
+      return document.getElementById(id).classList.contains('on');
+    }
+
+    // ======================================================================
+    // 嗅探面板
+    // ======================================================================
+
     const snifferItems = [
       { type: 'video', name: 'lecture-recording.mp4', url: 'https://cdn.edu/lectures/2024/lecture-recording.mp4?token=abc123', size: 524288000 },
       { type: 'video', name: 'tutorial.webm', url: 'https://videos.example.com/tutorial.webm', size: 104857600 },
@@ -791,19 +1126,18 @@
       `).join('');
     }
 
-    function downloadSnifferItem(index) {
+    async function downloadSnifferItem(index) {
       const item = snifferItems[index];
-      const ext = item.name.split('.').pop().toUpperCase().slice(0, 4);
-      downloads.unshift({
-        id: String(Date.now()), name: item.name, ext, url: item.url,
-        size: item.size, downloaded: 0, speed: Math.floor(item.size * 0.02),
-        status: 'downloading', fragments: 8, fragmentsDone: 0, protocol: 'HTTPS',
-      });
-      snifferItems.splice(index, 1);
-      renderSniffer();
-      // 切换到下载视图
-      document.querySelector('[data-view="downloads"]').click();
-      renderList();
+      try {
+        await invoke('create_task', { url: item.url });
+        snifferItems.splice(index, 1);
+        renderSniffer();
+        await refreshTaskList();
+        // 切换到下载视图
+        document.querySelector('[data-view="downloads"]').click();
+      } catch (e) {
+        console.error('从嗅探面板创建任务失败:', e);
+      }
     }
 
     function toggleSniffer() {
@@ -814,33 +1148,45 @@
       renderSniffer();
     }
 
-    function saveSettings() {
-      // 模拟保存
-      const btn = event.target;
-      btn.textContent = '已保存';
-      btn.style.background = '#22c55e';
-      setTimeout(() => { btn.textContent = '保存设置'; btn.style.background = ''; }, 1500);
-    }
+    // ======================================================================
+    // 事件绑定
+    // ======================================================================
 
-    // 模拟下载进度更新
-    setInterval(() => {
-      downloads.forEach(dl => {
-        if (dl.status === 'downloading' && dl.downloaded < dl.size) {
-          dl.downloaded = Math.min(dl.downloaded + dl.speed, dl.size);
-          if (dl.downloaded >= dl.size) {
-            dl.status = 'completed';
-            dl.speed = 0;
-            dl.fragmentsDone = dl.fragments;
-          }
-        }
+    document.getElementById('btn-download').addEventListener('click', startDownload);
+    document.getElementById('url-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter') startDownload();
+    });
+    document.getElementById('btn-pause-all').addEventListener('click', pauseAll);
+
+    // 视图切换
+    document.querySelectorAll('.nav-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const view = item.dataset.view;
+        document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+        item.classList.add('active');
+        document.querySelectorAll('.downloads-view, .sniffer-view, .settings-view').forEach(v => v.classList.remove('active'));
+        document.getElementById('view-' + view).classList.add('active');
+        // 顶部栏只在下载视图显示
+        document.querySelector('.topbar').style.display = view === 'downloads' ? 'flex' : 'none';
+        // 详情面板只在下载视图显示
+        if (view !== 'downloads') document.getElementById('detail-panel').style.display = 'none';
+        // 切换到设置视图时加载最新配置
+        if (view === 'settings') loadSettings();
       });
-      renderList();
-      if (selectedId) selectDownload(selectedId);
-    }, 1000);
+    });
 
-    // 初始渲染
-    renderList();
-    renderSniffer();
+    // ======================================================================
+    // 初始化
+    // ======================================================================
+
+    async function init() {
+      await loadSettings();
+      await refreshTaskList();
+      renderSniffer();
+      // 定时从后端刷新活跃任务状态
+      setInterval(refreshTaskList, 2000);
+    }
+    init();
   </script>
 </body>
 </html>
