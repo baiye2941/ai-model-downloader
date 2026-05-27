@@ -496,13 +496,13 @@ use qf_sniffer::resources::ResourceManager;
 async fn integration_downloader_full_pipeline() {
     let tmp = NamedTempFile::new().unwrap();
     let file_size: u64 = 3072; // 3KB,3 个分片
-    let test_data = vec![0xAB_u8; file_size as usize];
+    let _test_data = vec![0xAB_u8; file_size as usize];
 
     let meta = test_metadata("integration.bin", file_size);
-    let protocol =
+    let _protocol =
         MockProtocol::new(meta).with_range_data(0, 1023, Bytes::from(vec![0xAB_u8; 1024]));
 
-    let config = DownloadConfig {
+    let _config = DownloadConfig {
         download_dir: tmp.path().parent().unwrap().to_string_lossy().to_string(),
         max_concurrent_fragments: 2,
         verify_checksum: false,

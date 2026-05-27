@@ -11,6 +11,10 @@ tokio.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.6"
+libc = "0.2"
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio-test.workspace = true

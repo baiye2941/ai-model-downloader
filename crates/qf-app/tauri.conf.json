@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.quantumfetch.app",
   "build": {
-    "frontendDist": "../frontend/dist",
+    "frontendDist": "../../frontend/dist",
     "devUrl": "http://localhost:3000",
-    "beforeDevCommand": "cd frontend && bun run dev",
-    "beforeBuildCommand": "cd frontend && bun run build"
+    "beforeDevCommand": "cd ../../frontend && bun run dev",
+    "beforeBuildCommand": "cd ../../frontend && bun run build"
   },
   "app": {
     "windows": [

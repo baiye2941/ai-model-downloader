@@ -51,6 +51,20 @@ impl<S: AsyncStorage> WritePipeline<S> {
     pub fn storage(&self) -> &S {
         &self.storage
     }
+
+    /// 批量写入多个分片数据,减少 fsync 次数
+    ///
+    /// 将多个 (offset, data) 分片依次写入,最后统一 sync 一次。
+    /// 相比逐个调用 write_and_sync,大幅减少磁盘刷写开销。
+    pub async fn write_batch(&self, segments: &[(u64, &[u8])]) -> QfResult<usize> {
+        let mut total = 0;
+        for (offset, data) in segments {
+            total += self.write(*offset, data).await?;
+        }
+        // 最后统一 sync 一次
+        self.storage.sync().await?;
+        Ok(total)
+    }
 }
 
 #[cfg(test)]
@@ -110,5 +124,51 @@ mod tests {
         let read = pipeline.storage().read_at(0, &mut buf).await.unwrap();
         assert_eq!(read, 12);
         assert_eq!(&buf, b"AAAABBBBCCCC");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_write_batch() {
+        let tmp = NamedTempFile::new().unwrap();
+        let storage = TokioFile::open(tmp.path()).await.unwrap();
+        let pool = BufferPool::new(4096, 4);
+        let pipeline = WritePipeline::new(storage, pool);
+
+        let segments: Vec<(u64, &[u8])> = vec![(0, b"AAAA"), (4, b"BBBB"), (8, b"CCCC")];
+        let total = pipeline.write_batch(&segments).await.unwrap();
+        assert_eq!(total, 12);
+
+        let mut buf = [0u8; 12];
+        let read = pipeline.storage().read_at(0, &mut buf).await.unwrap();
+        assert_eq!(read, 12);
+        assert_eq!(&buf, b"AAAABBBBCCCC");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_write_batch_empty() {
+        let tmp = NamedTempFile::new().unwrap();
+        let storage = TokioFile::open(tmp.path()).await.unwrap();
+        let pool = BufferPool::new(4096, 4);
+        let pipeline = WritePipeline::new(storage, pool);
+
+        let segments: Vec<(u64, &[u8])> = vec![];
+        let total = pipeline.write_batch(&segments).await.unwrap();
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_write_batch_single() {
+        let tmp = NamedTempFile::new().unwrap();
+        let storage = TokioFile::open(tmp.path()).await.unwrap();
+        let pool = BufferPool::new(4096, 4);
+        let pipeline = WritePipeline::new(storage, pool);
+
+        let segments: Vec<(u64, &[u8])> = vec![(0, b"single")];
+        let total = pipeline.write_batch(&segments).await.unwrap();
+        assert_eq!(total, 6);
+
+        let mut buf = [0u8; 6];
+        let read = pipeline.storage().read_at(0, &mut buf).await.unwrap();
+        assert_eq!(read, 6);
+        assert_eq!(&buf, b"single");
     }
 }

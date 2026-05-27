@@ -83,6 +83,24 @@ impl ConnectionPool {
     pub fn config(&self) -> &PoolConfig {
         &self.config
     }
+
+    /// 清理没有活跃连接的主机信号量
+    ///
+    /// 遍历所有主机信号量,移除那些所有许可都可用(即无活跃连接)的条目。
+    /// 建议在下载任务完成后定期调用,避免内存泄漏。
+    pub async fn cleanup_idle_hosts(&self) {
+        let mut map = self.host_semaphores.lock().await;
+        map.retain(|_, sem| {
+            // 保留还有未归还许可(即有活跃连接)的主机
+            sem.available_permits() < self.config.max_per_host as usize
+        });
+    }
+
+    /// 当前跟踪的主机数量
+    pub async fn host_count(&self) -> usize {
+        let map = self.host_semaphores.lock().await;
+        map.len()
+    }
 }
 
 /// 连接许可,Drop 时自动归还连接
@@ -148,5 +166,55 @@ mod tests {
         let config = PoolConfig::default();
         assert_eq!(config.max_per_host, 16);
         assert_eq!(config.max_global, 256);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_idle_hosts_removes_inactive() {
+        let pool = ConnectionPool::new(PoolConfig {
+            max_per_host: 2,
+            max_global: 10,
+        });
+        // 触发主机条目创建
+        {
+            let _p1 = pool.acquire("example.com").await;
+            let _p2 = pool.acquire("other.com").await;
+        }
+        // 所有连接已释放,主机应为空闲
+        assert_eq!(pool.host_count().await, 2);
+        pool.cleanup_idle_hosts().await;
+        assert_eq!(pool.host_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_idle_hosts_keeps_active() {
+        let pool = ConnectionPool::new(PoolConfig {
+            max_per_host: 2,
+            max_global: 10,
+        });
+        let _active = pool.acquire("busy.com").await;
+        // 空闲主机
+        {
+            let _p = pool.acquire("idle.com").await;
+        }
+        pool.cleanup_idle_hosts().await;
+        // busy.com 仍有活跃连接,应保留;idle.com 应被清理
+        assert_eq!(pool.host_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_idle_hosts_empty_pool() {
+        let pool = ConnectionPool::new(PoolConfig::default());
+        pool.cleanup_idle_hosts().await;
+        assert_eq!(pool.host_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_host_count() {
+        let pool = ConnectionPool::new(PoolConfig::default());
+        assert_eq!(pool.host_count().await, 0);
+        let _p1 = pool.acquire("a.com").await;
+        let _p2 = pool.acquire("b.com").await;
+        let _p3 = pool.acquire("c.com").await;
+        assert_eq!(pool.host_count().await, 3);
     }
 }

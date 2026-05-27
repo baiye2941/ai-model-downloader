@@ -69,6 +69,37 @@ impl BufferPool {
     pub fn available(&self) -> usize {
         self.pool.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
+
+    /// 预热 buffer 池,预分配所有 buffer 避免运行时分配
+    ///
+    /// 在下载任务开始前调用,确保后续 alloc() 不会触发堆分配。
+    /// 如果池中已有 buffer,只会补充不足的部分。
+    pub fn prewarm(&self) {
+        let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        while pool.len() < self.capacity {
+            pool.push_back(BytesMut::with_capacity(self.buffer_size));
+        }
+    }
+
+    /// 获取池统计信息
+    pub fn stats(&self) -> BufferPoolStats {
+        BufferPoolStats {
+            available: self.available(),
+            capacity: self.capacity,
+            buffer_size: self.buffer_size,
+        }
+    }
+}
+
+/// Buffer 池统计信息
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BufferPoolStats {
+    /// 当前可用 buffer 数量
+    pub available: usize,
+    /// 池最大容量
+    pub capacity: usize,
+    /// 每个 buffer 的字节大小
+    pub buffer_size: usize,
 }
 
 impl Clone for BufferPool {
@@ -153,5 +184,94 @@ mod tests {
         let pool2 = pool.clone();
         let _buf = pool.alloc();
         assert_eq!(pool2.available(), 2);
+    }
+
+    #[test]
+    fn test_prewarm_fills_empty_pool() {
+        let pool = BufferPool::new(4096, 8);
+        assert_eq!(pool.available(), 0);
+        pool.prewarm();
+        assert_eq!(pool.available(), 8);
+    }
+
+    #[test]
+    fn test_prewarm_fills_partial_pool() {
+        let pool = BufferPool::new(1024, 5);
+        let _b1 = pool.alloc();
+        let _b2 = pool.alloc();
+        // 池为空,但 capacity 是 5
+        pool.prewarm();
+        assert_eq!(pool.available(), 5);
+    }
+
+    #[test]
+    fn test_prewarm_idempotent() {
+        let pool = BufferPool::new(2048, 4);
+        pool.prewarm();
+        assert_eq!(pool.available(), 4);
+        pool.prewarm();
+        assert_eq!(pool.available(), 4);
+    }
+
+    #[test]
+    fn test_prewarm_buffers_have_correct_capacity() {
+        let pool = BufferPool::new(4096, 3);
+        pool.prewarm();
+        let buf = pool.alloc();
+        assert!(buf.capacity() >= 4096);
+    }
+
+    #[test]
+    fn test_stats_empty_pool() {
+        let pool = BufferPool::new(4096, 10);
+        let stats = pool.stats();
+        assert_eq!(
+            stats,
+            BufferPoolStats {
+                available: 0,
+                capacity: 10,
+                buffer_size: 4096,
+            }
+        );
+    }
+
+    #[test]
+    fn test_stats_after_prefill() {
+        let pool = BufferPool::with_prefill(1024, 5);
+        let stats = pool.stats();
+        assert_eq!(
+            stats,
+            BufferPoolStats {
+                available: 5,
+                capacity: 5,
+                buffer_size: 1024,
+            }
+        );
+    }
+
+    #[test]
+    fn test_stats_after_prewarm() {
+        let pool = BufferPool::new(2048, 6);
+        pool.prewarm();
+        let stats = pool.stats();
+        assert_eq!(
+            stats,
+            BufferPoolStats {
+                available: 6,
+                capacity: 6,
+                buffer_size: 2048,
+            }
+        );
+    }
+
+    #[test]
+    fn test_stats_after_alloc_and_release() {
+        let pool = BufferPool::with_prefill(512, 3);
+        let buf = pool.alloc();
+        let stats = pool.stats();
+        assert_eq!(stats.available, 2);
+        pool.release(buf);
+        let stats = pool.stats();
+        assert_eq!(stats.available, 3);
     }
 }
