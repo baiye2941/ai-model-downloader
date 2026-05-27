@@ -119,22 +119,46 @@ fn extract_filename(url_str: &str) -> String {
 }
 
 /// 简易百分号解码(不依赖外部 crate)
+///
+/// 对无效的 `%XX` 序列(如 `%GG`),保留原样字符而非返回 None。
+/// 仅当最终结果不是合法 UTF-8 时返回 None。
 fn percent_decode(input: &str) -> Option<String> {
     let mut output = Vec::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
-            let byte = u8::from_str_radix(hex, 16).ok()?;
-            output.push(byte);
-            i += 3;
+            if let Some(byte) = parse_hex_pair(bytes[i + 1], bytes[i + 2]) {
+                output.push(byte);
+                i += 3;
+            } else {
+                // 无效百分号编码,保留 `%` 原样
+                output.push(bytes[i]);
+                i += 1;
+            }
         } else {
             output.push(bytes[i]);
             i += 1;
         }
     }
     String::from_utf8(output).ok()
+}
+
+/// 解析两个十六进制 ASCII 字节为 `u8`,无效时返回 `None`
+fn parse_hex_pair(high: u8, low: u8) -> Option<u8> {
+    let h = hex_digit(high)?;
+    let l = hex_digit(low)?;
+    Some(h * 16 + l)
+}
+
+/// 单个十六进制 ASCII 字节转 `u8` (0-15),无效时返回 `None`
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// 获取当前本地时间的 ISO 8601 字符串
@@ -368,6 +392,7 @@ pub fn update_config(config: AppConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     /// 重置全局配置为默认值(含中毒恢复)
     fn reset_config() {
@@ -390,6 +415,7 @@ mod tests {
 
     // -- create_task 测试 --
 
+    #[serial]
     #[test]
     fn test_create_task_returns_valid_uuid() {
         clear_tasks();
@@ -398,6 +424,7 @@ mod tests {
         assert!(Uuid::parse_str(&id).is_ok());
     }
 
+    #[serial]
     #[test]
     fn test_create_task_extracts_filename() {
         clear_tasks();
@@ -410,6 +437,7 @@ mod tests {
         assert_eq!(task.file_name, "app-v2.0.tar.gz");
     }
 
+    #[serial]
     #[test]
     fn test_create_task_default_status_is_pending() {
         clear_tasks();
@@ -421,6 +449,7 @@ mod tests {
         assert!((task.progress - 0.0).abs() < f64::EPSILON);
     }
 
+    #[serial]
     #[test]
     fn test_create_task_with_download_dir() {
         clear_tasks();
@@ -439,6 +468,7 @@ mod tests {
 
     // -- pause / resume 测试 --
 
+    #[serial]
     #[test]
     fn test_pause_pending_task() {
         clear_tasks();
@@ -449,6 +479,7 @@ mod tests {
         assert_eq!(task.speed, 0);
     }
 
+    #[serial]
     #[test]
     fn test_resume_paused_task() {
         clear_tasks();
@@ -459,6 +490,7 @@ mod tests {
         assert_eq!(task.status, "downloading");
     }
 
+    #[serial]
     #[test]
     fn test_pause_already_paused_task_fails() {
         clear_tasks();
@@ -469,6 +501,7 @@ mod tests {
         assert!(result.unwrap_err().contains("不允许暂停"));
     }
 
+    #[serial]
     #[test]
     fn test_resume_non_paused_task_fails() {
         clear_tasks();
@@ -481,6 +514,7 @@ mod tests {
 
     // -- cancel 测试 --
 
+    #[serial]
     #[test]
     fn test_cancel_pending_task() {
         clear_tasks();
@@ -490,6 +524,7 @@ mod tests {
         assert_eq!(task.status, "cancelled");
     }
 
+    #[serial]
     #[test]
     fn test_cancel_already_cancelled_task_fails() {
         clear_tasks();
@@ -502,6 +537,7 @@ mod tests {
 
     // -- delete 测试 --
 
+    #[serial]
     #[test]
     fn test_delete_cancelled_task() {
         clear_tasks();
@@ -511,6 +547,7 @@ mod tests {
         assert!(get_task_detail(id).is_err());
     }
 
+    #[serial]
     #[test]
     fn test_delete_pending_task_fails() {
         clear_tasks();
@@ -522,6 +559,7 @@ mod tests {
 
     // -- get_task_list 测试 --
 
+    #[serial]
     #[test]
     fn test_get_task_list_returns_all_tasks() {
         clear_tasks();
@@ -533,6 +571,7 @@ mod tests {
         assert!(ids.contains(&&id2));
     }
 
+    #[serial]
     #[test]
     fn test_get_task_list_empty() {
         clear_tasks();
@@ -542,6 +581,7 @@ mod tests {
 
     // -- get_task_detail 测试 --
 
+    #[serial]
     #[test]
     fn test_get_task_detail_not_found() {
         clear_tasks();
@@ -552,6 +592,7 @@ mod tests {
 
     // -- 配置测试 --
 
+    #[serial]
     #[test]
     fn test_get_config_returns_defaults() {
         reset_config();
@@ -563,6 +604,7 @@ mod tests {
         assert!(cfg.verify_checksum);
     }
 
+    #[serial]
     #[test]
     fn test_update_config_roundtrip() {
         // 保存旧配置并在测试结束后恢复,避免污染其他测试
@@ -589,6 +631,7 @@ mod tests {
 
     // -- 辅助函数测试 --
 
+    #[serial]
     #[test]
     fn test_extract_filename_basic() {
         assert_eq!(
@@ -597,6 +640,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn test_extract_filename_with_query() {
         assert_eq!(
@@ -605,11 +649,13 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn test_extract_filename_empty_path() {
         assert_eq!(extract_filename("https://example.com/"), "unknown");
     }
 
+    #[serial]
     #[test]
     fn test_extract_filename_encoded() {
         assert_eq!(
@@ -618,11 +664,23 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn test_extract_filename_invalid_url() {
         assert_eq!(extract_filename("not a url"), "unknown");
     }
 
+    #[serial]
+    #[test]
+    fn test_extract_filename_with_invalid_hex_encoding() {
+        // 无效百分号编码应保留原样字符而非回退到 "unknown"
+        assert_eq!(
+            extract_filename("https://example.com/file%GG.txt"),
+            "file%GG.txt"
+        );
+    }
+
+    #[serial]
     #[test]
     fn test_percent_decode_basic() {
         assert_eq!(
@@ -631,6 +689,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn test_percent_decode_no_encoding() {
         assert_eq!(
@@ -639,8 +698,19 @@ mod tests {
         );
     }
 
+    #[serial]
+    #[test]
+    fn test_percent_decode_invalid_hex_preserves_literal() {
+        // 无效的 %GG 应保留原样,而非返回 None
+        assert_eq!(
+            percent_decode("file%GG.txt"),
+            Some("file%GG.txt".to_string())
+        );
+    }
+
     // -- 任务状态流转完整性测试 --
 
+    #[serial]
     #[test]
     fn test_full_task_lifecycle() {
         clear_tasks();
@@ -663,6 +733,7 @@ mod tests {
 
     // -- AppConfig 序列化测试 --
 
+    #[serial]
     #[test]
     fn test_app_config_serialization_roundtrip() {
         let cfg = AppConfig {
@@ -683,6 +754,7 @@ mod tests {
 
     // -- TaskInfo 序列化测试 --
 
+    #[serial]
     #[test]
     fn test_task_info_serialization_roundtrip() {
         let task = TaskInfo {

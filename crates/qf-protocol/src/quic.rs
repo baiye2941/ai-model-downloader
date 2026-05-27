@@ -53,8 +53,10 @@ impl QuicTransport {
 
         crypto.alpn_protocols = vec![b"h3".to_vec()];
 
-        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
-            .map_err(|e| QfError::Network(format!("创建 QUIC 端点失败: {e}")))?;
+        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().map_err(
+            |e: std::net::AddrParseError| QfError::Network(format!("解析本地地址失败: {e}")),
+        )?)
+        .map_err(|e| QfError::Network(format!("创建 QUIC 端点失败: {e}")))?;
 
         endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(crypto)

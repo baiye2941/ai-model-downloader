@@ -14,8 +14,7 @@ pub mod traits;
 pub mod types;
 
 // 重新导出核心类型
-pub use config::{ConnectionConfig, DownloadConfig, SchedulerConfig};
+pub use config::SchedulerConfig;
 pub use error::{QfError, QfResult};
-pub use event::{DownloadEvent, FragmentEvent, PeerEvent};
-pub use traits::{DownloadTask, FragmentDownloader, Protocol, Storage, Verifier};
-pub use types::{DownloadState, FileMetadata, FragmentInfo, TaskId};
+pub use traits::{Protocol, Storage, Verifier};
+pub use types::{FileMetadata, FragmentInfo, TaskId};

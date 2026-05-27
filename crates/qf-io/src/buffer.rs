@@ -51,7 +51,7 @@ impl BufferPool {
 
     /// 从池中获取一个 buffer,池空时新建
     pub fn alloc(&self) -> BytesMut {
-        let mut pool = self.pool.lock().unwrap();
+        let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
         pool.pop_front()
             .unwrap_or_else(|| BytesMut::with_capacity(self.buffer_size))
     }
@@ -59,7 +59,7 @@ impl BufferPool {
     /// 归还 buffer 到池中,超出容量时丢弃
     pub fn release(&self, mut buf: BytesMut) {
         buf.clear();
-        let mut pool = self.pool.lock().unwrap();
+        let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
         if pool.len() < self.capacity {
             pool.push_back(buf);
         }
@@ -67,7 +67,7 @@ impl BufferPool {
 
     /// 当前池中可用 buffer 数量
     pub fn available(&self) -> usize {
-        self.pool.lock().unwrap().len()
+        self.pool.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 

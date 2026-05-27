@@ -6,6 +6,9 @@ node_modules/
 frontend/dist/
 frontend/.svelte-kit/
 
+# Tauri 自动生成文件
+**/gen/
+
 # Claude Code 项目配置（不提交）
 .claude/
 .mcp.json
