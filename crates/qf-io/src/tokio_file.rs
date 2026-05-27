@@ -27,7 +27,7 @@ impl TokioFile {
             .truncate(false)
             .open(&path)
             .await
-            .map_err(|e| QfError::Io(e))?;
+            .map_err(QfError::Io)?;
         Ok(Self {
             path,
             file: tokio::sync::Mutex::new(file),

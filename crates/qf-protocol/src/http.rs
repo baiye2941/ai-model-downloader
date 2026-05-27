@@ -137,12 +137,11 @@ impl Protocol for HttpClient {
 /// 从 URL 和 headers 提取文件名
 fn extract_filename(url: &str, headers: &reqwest::header::HeaderMap) -> String {
     // 优先从 Content-Disposition 提取
-    if let Some(cd) = headers.get("content-disposition") {
-        if let Ok(cd_str) = cd.to_str() {
-            if let Some(name) = parse_content_disposition(cd_str) {
-                return name;
-            }
-        }
+    if let Some(cd) = headers.get("content-disposition")
+        && let Ok(cd_str) = cd.to_str()
+        && let Some(name) = parse_content_disposition(cd_str)
+    {
+        return name;
     }
     // 从 URL 路径提取
     url::Url::parse(url)
