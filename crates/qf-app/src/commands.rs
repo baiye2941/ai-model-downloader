@@ -332,11 +332,11 @@ pub fn delete_task(task_id: String) -> Result<(), String> {
 
 /// 获取所有任务列表
 #[tauri::command]
-pub fn get_task_list() -> Vec<TaskInfo> {
+pub fn get_task_list() -> Result<Vec<TaskInfo>, String> {
     TASK_STORE
         .lock()
         .map(|store| store.values().cloned().collect())
-        .unwrap_or_default()
+        .map_err(|e| format!("获取任务锁失败: {e}"))
 }
 
 /// 获取单个任务详情
@@ -358,18 +358,11 @@ pub fn get_task_detail(task_id: String) -> Result<TaskInfo, String> {
 
 /// 获取当前应用配置
 #[tauri::command]
-pub fn get_config() -> AppConfig {
+pub fn get_config() -> Result<AppConfig, String> {
     CONFIG_STORE
         .lock()
         .map(|cfg| cfg.clone())
-        .unwrap_or_else(|_| AppConfig {
-            download_dir: ".".to_string(),
-            max_concurrent_tasks: 5,
-            max_concurrent_fragments: 16,
-            max_connections_per_host: 16,
-            enable_quic: false,
-            verify_checksum: true,
-        })
+        .map_err(|e| format!("获取配置锁失败: {e}"))
 }
 
 /// 更新应用配置
@@ -462,7 +455,7 @@ mod tests {
         let task = get_task_detail(id).unwrap();
         // 验证任务已创建且配置被更新
         assert_eq!(task.url, "https://example.com/file.zip");
-        let cfg = get_config();
+        let cfg = get_config().unwrap();
         assert_eq!(cfg.download_dir, "/tmp/custom");
     }
 
@@ -565,7 +558,7 @@ mod tests {
         clear_tasks();
         let id1 = create_task("https://example.com/a.zip".to_string(), None).unwrap();
         let id2 = create_task("https://example.com/b.zip".to_string(), None).unwrap();
-        let list = get_task_list();
+        let list = get_task_list().unwrap();
         let ids: Vec<&String> = list.iter().map(|t| &t.id).collect();
         assert!(ids.contains(&&id1));
         assert!(ids.contains(&&id2));
@@ -575,7 +568,7 @@ mod tests {
     #[test]
     fn test_get_task_list_empty() {
         clear_tasks();
-        let list = get_task_list();
+        let list = get_task_list().unwrap();
         assert!(list.is_empty());
     }
 
@@ -596,7 +589,7 @@ mod tests {
     #[test]
     fn test_get_config_returns_defaults() {
         reset_config();
-        let cfg = get_config();
+        let cfg = get_config().unwrap();
         assert_eq!(cfg.max_concurrent_tasks, 5);
         assert_eq!(cfg.max_concurrent_fragments, 16);
         assert_eq!(cfg.max_connections_per_host, 16);
@@ -608,7 +601,7 @@ mod tests {
     #[test]
     fn test_update_config_roundtrip() {
         // 保存旧配置并在测试结束后恢复,避免污染其他测试
-        let old_cfg = get_config();
+        let old_cfg = get_config().unwrap();
         let new_cfg = AppConfig {
             download_dir: "/data/downloads".to_string(),
             max_concurrent_tasks: 10,
@@ -618,7 +611,7 @@ mod tests {
             verify_checksum: false,
         };
         update_config(new_cfg).unwrap();
-        let cfg = get_config();
+        let cfg = get_config().unwrap();
         assert_eq!(cfg.download_dir, "/data/downloads");
         assert_eq!(cfg.max_concurrent_tasks, 10);
         assert_eq!(cfg.max_concurrent_fragments, 32);

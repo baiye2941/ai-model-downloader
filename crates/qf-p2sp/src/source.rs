@@ -145,12 +145,14 @@ fn xorshift64_next(state: u64) -> u64 {
     x
 }
 
-/// 生成 [0.0, 1.0) 范围内的伪随机浮点数(有状态,Xorshift64)
+/// 生成 [0.0, 1.0) 范围内的伪随机浮点数(线程安全,Xorshift64)
 fn random_f64() -> f64 {
     ensure_prng_seeded();
-    let old = PRNG_STATE.load(Ordering::Relaxed);
-    let new = xorshift64_next(old);
-    PRNG_STATE.store(new, Ordering::Relaxed);
+    let new = PRNG_STATE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+            Some(xorshift64_next(old))
+        })
+        .unwrap_or(1);
     // 取高 32 位归一化,分布更均匀
     ((new >> 32) as f64) / (u32::MAX as f64 + 1.0)
 }
@@ -161,9 +163,11 @@ fn random_index(upper: usize) -> usize {
         return 0;
     }
     ensure_prng_seeded();
-    let old = PRNG_STATE.load(Ordering::Relaxed);
-    let new = xorshift64_next(old);
-    PRNG_STATE.store(new, Ordering::Relaxed);
+    let new = PRNG_STATE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+            Some(xorshift64_next(old))
+        })
+        .unwrap_or(1);
     (new as usize) % upper
 }
 
