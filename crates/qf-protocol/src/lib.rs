@@ -8,3 +8,5 @@
 
 pub mod http;
 pub mod quic;
+
+pub use http::HttpClient;
