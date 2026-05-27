@@ -34,6 +34,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
+
 use qf_core::{QfError, QfResult};
 
 use crate::storage::AsyncStorage;
@@ -181,7 +184,7 @@ impl IoUringStorage {
         builder.setup_cqsize(self.config.cq_depth);
 
         if self.config.sqpoll {
-            builder.setup_sqpoll(self.config.sqpoll_idle_ms as usize);
+            builder.setup_sqpoll(self.config.sqpoll_idle_ms);
         }
 
         let ring = builder
