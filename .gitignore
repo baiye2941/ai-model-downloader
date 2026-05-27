@@ -29,3 +29,9 @@ Thumbs.db
 # 环境变量
 .env
 .env.local
+
+# 日志
+*.log
+
+# Bun
+bun.lockb

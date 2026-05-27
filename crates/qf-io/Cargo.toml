@@ -1,0 +1,16 @@
+[package]
+name = "qf-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QuantumFetch I/O 层:零拷贝存储引擎"
+
+[dependencies]
+qf-core = { path = "../qf-core" }
+tokio.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio-test.workspace = true

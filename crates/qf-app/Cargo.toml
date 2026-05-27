@@ -1,0 +1,17 @@
+[package]
+name = "qf-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QuantumFetch Tauri 应用入口"
+
+[dependencies]
+qf-core = { path = "../qf-core" }
+qf-engine = { path = "../qf-engine" }
+qf-scheduler = { path = "../qf-scheduler" }
+qf-sniffer = { path = "../qf-sniffer" }
+tauri.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
