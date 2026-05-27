@@ -47,3 +47,92 @@ pub enum QfError {
 
 /// 统一 Result 别名
 pub type QfResult<T> = Result<T, QfError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_error_display() {
+        let err = QfError::Network("连接超时".into());
+        assert_eq!(err.to_string(), "网络错误: 连接超时");
+    }
+
+    #[test]
+    fn test_protocol_error_display() {
+        let err = QfError::Protocol("404 Not Found".into());
+        assert_eq!(err.to_string(), "协议错误: 404 Not Found");
+    }
+
+    #[test]
+    fn test_io_error_from() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "文件不存在");
+        let err: QfError = io_err.into();
+        assert!(err.to_string().contains("I/O 错误"));
+    }
+
+    #[test]
+    fn test_checksum_mismatch_display() {
+        let err = QfError::ChecksumMismatch {
+            expected: "abc".into(),
+            actual: "def".into(),
+        };
+        assert!(err.to_string().contains("abc"));
+        assert!(err.to_string().contains("def"));
+    }
+
+    #[test]
+    fn test_cancelled_display() {
+        let err = QfError::Cancelled;
+        assert_eq!(err.to_string(), "任务已取消");
+    }
+
+    #[test]
+    fn test_task_not_found_display() {
+        let err = QfError::TaskNotFound("task-123".into());
+        assert!(err.to_string().contains("task-123"));
+    }
+
+    #[test]
+    fn test_connection_pool_exhausted() {
+        let err = QfError::ConnectionPoolExhausted;
+        assert_eq!(err.to_string(), "连接池已耗尽");
+    }
+
+    #[test]
+    fn test_timeout_display() {
+        let err = QfError::Timeout("30s".into());
+        assert!(err.to_string().contains("30s"));
+    }
+
+    #[test]
+    fn test_url_parse_error_from() {
+        let err: QfError = url::ParseError::EmptyHost.into();
+        assert!(err.to_string().contains("URL 解析错误"));
+    }
+
+    #[test]
+    fn test_serde_json_error_from() {
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err: QfError = json_err.into();
+        assert!(err.to_string().contains("序列化错误"));
+    }
+
+    #[test]
+    fn test_other_error() {
+        let err = QfError::Other("未知错误".into());
+        assert_eq!(err.to_string(), "其他错误: 未知错误");
+    }
+
+    #[test]
+    fn test_qf_result_ok() {
+        let result: QfResult<i32> = Ok(42);
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn test_qf_result_err() {
+        let result: QfResult<i32> = Err(QfError::Cancelled);
+        assert!(result.is_err());
+    }
+}

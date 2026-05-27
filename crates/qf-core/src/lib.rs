@@ -9,10 +9,13 @@
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod test_harness;
+pub mod traits;
 pub mod types;
 
 // 重新导出核心类型
 pub use config::{ConnectionConfig, DownloadConfig, SchedulerConfig};
 pub use error::{QfError, QfResult};
 pub use event::{DownloadEvent, FragmentEvent, PeerEvent};
+pub use traits::{DownloadTask, FragmentDownloader, Protocol, Storage, Verifier};
 pub use types::{DownloadState, FileMetadata, FragmentInfo, TaskId};

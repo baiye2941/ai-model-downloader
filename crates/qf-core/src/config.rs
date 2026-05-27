@@ -96,3 +96,69 @@ fn dirs() -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("HOME"))
         .map(std::path::PathBuf::from)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_download_config_default() {
+        let config = DownloadConfig::default();
+        assert_eq!(config.max_concurrent_fragments, 16);
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.request_timeout_secs, 30);
+        assert!(config.verify_checksum);
+        assert!(config.user_agent.starts_with("QuantumFetch/"));
+        assert!(config.headers.is_empty());
+    }
+
+    #[test]
+    fn test_connection_config_default() {
+        let config = ConnectionConfig::default();
+        assert_eq!(config.max_connections_per_host, 16);
+        assert_eq!(config.max_global_connections, 256);
+        assert_eq!(config.keep_alive_timeout_secs, 30);
+        assert_eq!(config.connect_timeout_secs, 10);
+        assert!(config.enable_http2);
+        assert!(!config.enable_quic);
+    }
+
+    #[test]
+    fn test_scheduler_config_default() {
+        let config = SchedulerConfig::default();
+        assert_eq!(config.min_fragment_size, 1024 * 1024);
+        assert_eq!(config.max_fragment_size, 64 * 1024 * 1024);
+        assert_eq!(config.sampling_interval_secs, 60);
+        assert!((config.ewma_alpha - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_download_config_serialization() {
+        let config = DownloadConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: DownloadConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.max_concurrent_fragments,
+            config.max_concurrent_fragments
+        );
+    }
+
+    #[test]
+    fn test_connection_config_serialization() {
+        let config = ConnectionConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: ConnectionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.max_connections_per_host,
+            config.max_connections_per_host
+        );
+    }
+
+    #[test]
+    fn test_scheduler_config_serialization() {
+        let config = SchedulerConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: SchedulerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.min_fragment_size, config.min_fragment_size);
+    }
+}

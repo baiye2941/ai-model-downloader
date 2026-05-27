@@ -58,3 +58,97 @@ pub struct FragmentInfo {
     /// 分片校验哈希
     pub hash: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_download_state_variants() {
+        assert_ne!(DownloadState::Pending, DownloadState::Downloading);
+        assert_ne!(DownloadState::Completed, DownloadState::Failed);
+        assert_eq!(DownloadState::Paused, DownloadState::Paused);
+    }
+
+    #[test]
+    fn test_download_state_clone() {
+        let state = DownloadState::Downloading;
+        let cloned = state;
+        assert_eq!(state, cloned);
+    }
+
+    #[test]
+    fn test_file_metadata_with_size() {
+        let meta = FileMetadata {
+            file_name: "test.bin".into(),
+            file_size: Some(1024),
+            content_type: Some("application/octet-stream".into()),
+            supports_range: true,
+            etag: Some("\"abc\"".into()),
+            last_modified: Some("Mon, 01 Jan 2024 00:00:00 GMT".into()),
+        };
+        assert_eq!(meta.file_size, Some(1024));
+        assert!(meta.supports_range);
+    }
+
+    #[test]
+    fn test_file_metadata_unknown_size() {
+        let meta = FileMetadata {
+            file_name: "stream.mp4".into(),
+            file_size: None,
+            content_type: None,
+            supports_range: false,
+            etag: None,
+            last_modified: None,
+        };
+        assert!(meta.file_size.is_none());
+        assert!(!meta.supports_range);
+    }
+
+    #[test]
+    fn test_fragment_info() {
+        let frag = FragmentInfo {
+            index: 0,
+            start: 0,
+            end: 999,
+            size: 1000,
+            downloaded: 500,
+            hash: None,
+        };
+        assert_eq!(frag.index, 0);
+        assert_eq!(frag.size, 1000);
+        assert_eq!(frag.downloaded, 500);
+    }
+
+    #[test]
+    fn test_task_id_generation() {
+        let id1 = TaskId::new_v4();
+        let id2 = TaskId::new_v4();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_file_metadata_serialization() {
+        let meta = FileMetadata {
+            file_name: "test.bin".into(),
+            file_size: Some(1024),
+            content_type: None,
+            supports_range: true,
+            etag: None,
+            last_modified: None,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let deserialized: FileMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.file_name, "test.bin");
+        assert_eq!(deserialized.file_size, Some(1024));
+    }
+
+    #[test]
+    fn test_download_state_serialization() {
+        let state = DownloadState::Downloading;
+        let json = serde_json::to_string(&state).unwrap();
+        assert_eq!(json, "\"Downloading\"");
+        let deserialized: DownloadState = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, DownloadState::Downloading);
+    }
+}
