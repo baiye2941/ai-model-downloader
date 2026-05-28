@@ -3,7 +3,7 @@
 //! 基于 Kademlia 协议的分布式哈希表,用于 Peer 发现。
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 /// DHT 节点标识(160-bit)
 pub type NodeId = [u8; 20];
@@ -16,7 +16,7 @@ pub struct DhtNode {
     /// 节点地址
     pub addr: String,
     /// 最后通信时间
-    pub last_seen: Instant,
+    pub last_seen: SystemTime,
 }
 
 impl DhtNode {
@@ -24,13 +24,16 @@ impl DhtNode {
         Self {
             id,
             addr,
-            last_seen: Instant::now(),
+            last_seen: SystemTime::now(),
         }
     }
 
     /// 节点是否过期(超过 15 分钟未通信)
     pub fn is_stale(&self) -> bool {
-        self.last_seen.elapsed() > Duration::from_secs(900)
+        self.last_seen
+            .elapsed()
+            .map(|d| d > Duration::from_secs(900))
+            .unwrap_or(false)
     }
 }
 

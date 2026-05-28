@@ -32,7 +32,13 @@ impl KvStore {
     /// 将键转换为安全的文件名
     fn safe_key(key: &str) -> String {
         key.chars()
-            .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect()
     }
 
@@ -161,7 +167,10 @@ mod tests {
             name: String,
             value: u32,
         }
-        let cfg = Config { name: "test".into(), value: 42 };
+        let cfg = Config {
+            name: "test".into(),
+            value: 42,
+        };
         store.put("config", &cfg).unwrap();
         let loaded: Option<Config> = store.get("config").unwrap();
         assert_eq!(loaded, Some(cfg));

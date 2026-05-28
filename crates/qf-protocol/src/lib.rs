@@ -105,7 +105,11 @@ async fn download_range_stream() {
     }
 
     impl Protocol for LocalMock {
-        fn probe(&self, _url: &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
+        fn probe(
+            &self,
+            _url: &str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>>
+        {
             let file_size = self.data.len() as u64;
             Box::pin(async move {
                 Ok(FileMetadata {
@@ -118,15 +122,28 @@ async fn download_range_stream() {
                 })
             })
         }
-        fn download_range(&self, _url: &str, _start: u64, _end: u64) -> std::pin::Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+        fn download_range(
+            &self,
+            _url: &str,
+            _start: u64,
+            _end: u64,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
             let data = self.data.clone();
             Box::pin(async move { Ok(data) })
         }
-        fn download_range_stream(&self, _url: &str, _start: u64, _end: u64) -> std::pin::Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+        fn download_range_stream(
+            &self,
+            _url: &str,
+            _start: u64,
+            _end: u64,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
             let data = self.data.clone();
             Box::pin(async move { Ok(data) })
         }
-        fn download_full(&self, _url: &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+        fn download_full(
+            &self,
+            _url: &str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
             let data = self.data.clone();
             Box::pin(async move { Ok(data) })
         }
@@ -225,9 +242,21 @@ fn mpquic() {
     }
 
     let paths = vec![
-        PathInfo { id: PathId(0), bandwidth: 100_000_000, rtt_ms: 10 },   // WiFi: 100Mbps, 10ms
-        PathInfo { id: PathId(1), bandwidth: 500_000_000, rtt_ms: 20 },   // 5G: 500Mbps, 20ms
-        PathInfo { id: PathId(2), bandwidth: 1_000_000_000, rtt_ms: 1 },  // 有线: 1Gbps, 1ms
+        PathInfo {
+            id: PathId(0),
+            bandwidth: 100_000_000,
+            rtt_ms: 10,
+        }, // WiFi: 100Mbps, 10ms
+        PathInfo {
+            id: PathId(1),
+            bandwidth: 500_000_000,
+            rtt_ms: 20,
+        }, // 5G: 500Mbps, 20ms
+        PathInfo {
+            id: PathId(2),
+            bandwidth: 1_000_000_000,
+            rtt_ms: 1,
+        }, // 有线: 1Gbps, 1ms
     ];
 
     // 总带宽

@@ -59,7 +59,10 @@ pub mod harness {
     }
 
     impl Protocol for MockProtocol {
-        fn probe(&self, _url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
+        fn probe(
+            &self,
+            _url: &str,
+        ) -> Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
             let this = self.clone();
             Box::pin(async move {
                 if let Some(ref meta) = this.metadata {
@@ -70,7 +73,12 @@ pub mod harness {
             })
         }
 
-        fn download_range(&self, _url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+        fn download_range(
+            &self,
+            _url: &str,
+            start: u64,
+            end: u64,
+        ) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
             let this = self.clone();
             Box::pin(async move {
                 let data = this.range_data.lock().unwrap();
@@ -80,15 +88,21 @@ pub mod harness {
             })
         }
 
-        fn download_range_stream(&self, url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+        fn download_range_stream(
+            &self,
+            url: &str,
+            start: u64,
+            end: u64,
+        ) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
             let this = self.clone();
             let url = url.to_owned();
-            Box::pin(async move {
-                this.download_range(&url, start, end).await
-            })
+            Box::pin(async move { this.download_range(&url, start, end).await })
         }
 
-        fn download_full(&self, _url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+        fn download_full(
+            &self,
+            _url: &str,
+        ) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
             let this = self.clone();
             Box::pin(async move {
                 this.default_data

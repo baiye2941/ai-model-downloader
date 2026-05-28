@@ -66,10 +66,7 @@ fn kademlia() {
     small_dht.add_node(DhtNode::new([1u8; 20], "10.0.0.1:6881".to_string()));
     small_dht.add_node(DhtNode::new([2u8; 20], "10.0.0.2:6881".to_string()));
     small_dht.add_node(DhtNode::new([3u8; 20], "10.0.0.3:6881".to_string()));
-    assert!(
-        small_dht.node_count() <= 2,
-        "超过 max_nodes 时应驱逐旧节点"
-    );
+    assert!(small_dht.node_count() <= 2, "超过 max_nodes 时应驱逐旧节点");
 
     // 手动构造过期节点验证清理
     let mut dht2 = KademliaDht::new([0u8; 20], 100);
@@ -77,7 +74,8 @@ fn kademlia() {
     // 插入一个过期节点(手动设置 last_seen 为很久以前)
     {
         let mut stale_node = DhtNode::new([9u8; 20], "10.0.0.9:6881".to_string());
-        stale_node.last_seen = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        // 构造过期节点(手动设置 last_seen 为很久以前)
+        stale_node.last_seen = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
         dht2.add_node(stale_node);
     }
     assert_eq!(dht2.node_count(), 2);

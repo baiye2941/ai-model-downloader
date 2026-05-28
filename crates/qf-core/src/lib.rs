@@ -193,7 +193,10 @@ fn app_config() {
     assert!(json.contains("download_dir"), "JSON 应包含字段名: {json}");
     let restored: config::DownloadConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.download_dir, cfg.download_dir);
-    assert_eq!(restored.max_concurrent_fragments, cfg.max_concurrent_fragments);
+    assert_eq!(
+        restored.max_concurrent_fragments,
+        cfg.max_concurrent_fragments
+    );
     assert_eq!(restored.max_retries, cfg.max_retries);
     assert_eq!(restored.request_timeout_secs, cfg.request_timeout_secs);
     assert_eq!(restored.verify_checksum, cfg.verify_checksum);

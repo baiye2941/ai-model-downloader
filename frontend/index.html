@@ -842,6 +842,20 @@
 
   <script>
     // ======================================================================
+    // 安全: HTML 转义函数 - 防止 XSS 注入
+    // ======================================================================
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function escapeAttr(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // ======================================================================
     // Tauri API 桥接层 - 自动检测环境
     // ======================================================================
 
@@ -1053,35 +1067,40 @@
 
     function renderCard(dl) {
       const progress = getProgress(dl);
-      const statusClass = 'status-' + dl.status;
+
+      const safeId = escapeAttr(dl.id);
+      const safeName = escapeHtml(dl.name);
+      const safeExt = escapeHtml(dl.ext);
+      const safeStatusClass = 'status-' + escapeAttr(dl.status);
+      const safeProgressClass = escapeAttr(dl.status);
 
       // 根据任务状态生成操作按钮
       let actionsHtml = '';
       if (dl.status === 'downloading' || dl.status === 'pending') {
-        actionsHtml += '<button class="btn-card-action" onclick="event.stopPropagation(); taskPause(\'' + dl.id + '\')">' + ICON_PAUSE + '暂停</button>';
+        actionsHtml += '<button class="btn-card-action" onclick="event.stopPropagation(); taskPause(\'' + safeId + '\')">' + ICON_PAUSE + '暂停</button>';
       } else if (dl.status === 'paused') {
-        actionsHtml += '<button class="btn-card-action" onclick="event.stopPropagation(); taskResume(\'' + dl.id + '\')">' + ICON_RESUME + '恢复</button>';
+        actionsHtml += '<button class="btn-card-action" onclick="event.stopPropagation(); taskResume(\'' + safeId + '\')">' + ICON_RESUME + '恢复</button>';
       }
       // 活跃任务可取消
       if (dl.status !== 'completed' && dl.status !== 'cancelled') {
-        actionsHtml += '<button class="btn-card-action action-danger" onclick="event.stopPropagation(); taskCancel(\'' + dl.id + '\')">' + ICON_CANCEL + '取消</button>';
+        actionsHtml += '<button class="btn-card-action action-danger" onclick="event.stopPropagation(); taskCancel(\'' + safeId + '\')">' + ICON_CANCEL + '取消</button>';
       }
       // 非活跃任务可删除
       if (dl.status === 'completed' || dl.status === 'cancelled' || dl.status === 'failed') {
-        actionsHtml += '<button class="btn-card-action action-danger" onclick="event.stopPropagation(); taskDelete(\'' + dl.id + '\')">' + ICON_DELETE + '删除</button>';
+        actionsHtml += '<button class="btn-card-action action-danger" onclick="event.stopPropagation(); taskDelete(\'' + safeId + '\')">' + ICON_DELETE + '删除</button>';
       }
 
       return `
-        <div class="download-card" data-id="${dl.id}" onclick="selectDownload('${dl.id}')">
+        <div class="download-card" data-id="${safeId}" onclick="selectDownload('${safeId}')">
           <div class="card-header">
             <div class="card-name">
-              ${dl.name}
-              <span class="ext">${dl.ext}</span>
+              ${safeName}
+              <span class="ext">${safeExt}</span>
             </div>
-            <span class="card-status ${statusClass}">${statusText(dl.status)}</span>
+            <span class="card-status ${safeStatusClass}">${escapeHtml(statusText(dl.status))}</span>
           </div>
           <div class="progress-bar">
-            <div class="progress-fill ${dl.status}" style="width: ${progress}%"></div>
+            <div class="progress-fill ${safeProgressClass}" style="width: ${progress}%"></div>
           </div>
           <div class="card-details">
             <div class="detail-item">
@@ -1090,9 +1109,9 @@
             </div>
             <div class="detail-item">
               <span class="detail-label">大小</span>
-              <span class="mono">${formatSize(dl.size)}</span>
+              <span class="mono">${escapeHtml(formatSize(dl.size))}</span>
             </div>
-            ${dl.speed > 0 ? '<div class="detail-item"><span class="detail-label">速度</span><span class="speed-value">' + formatSpeed(dl.speed) + '</span></div>' : ''}
+            ${dl.speed > 0 ? '<div class="detail-item"><span class="detail-label">速度</span><span class="speed-value">' + escapeHtml(formatSpeed(dl.speed)) + '</span></div>' : ''}
             <div class="detail-item">
               <span class="detail-label">分片</span>
               <span class="mono">${dl.fragmentsDone}/${dl.fragments}</span>
@@ -1113,7 +1132,7 @@
       // 更新侧边栏统计
       const totalSpeed = active.reduce((sum, d) => sum + (d.speed || 0), 0);
       document.getElementById('stat-speed').textContent = formatSpeed(totalSpeed);
-      document.getElementById('stat-connections').textContent = active.reduce((sum, d) => sum + d.fragmentsDone, 0);
+      document.getElementById('stat-connections').textContent = downloads.filter(d => d.status === 'downloading').length;
       document.getElementById('stat-queue').textContent = active.length;
     }
 
@@ -1357,12 +1376,12 @@
       empty.style.display = 'none';
       list.innerHTML = snifferItems.map((item, i) => `
         <div class="sniffer-item">
-          <span class="sniffer-type type-${item.type}">${item.type}</span>
+          <span class="sniffer-type type-${escapeAttr(item.type)}">${escapeHtml(item.type)}</span>
           <div class="sniffer-info">
-            <div class="sniffer-name">${item.name}</div>
-            <div class="sniffer-url">${item.url}</div>
+            <div class="sniffer-name">${escapeHtml(item.name)}</div>
+            <div class="sniffer-url">${escapeHtml(item.url)}</div>
           </div>
-          <span class="sniffer-size mono">${formatSize(item.size)}</span>
+          <span class="sniffer-size mono">${escapeHtml(formatSize(item.size))}</span>
           <div class="sniffer-actions">
             <button class="btn-sm btn-download-sm" onclick="downloadSnifferItem(${i})">下载</button>
           </div>

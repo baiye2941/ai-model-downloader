@@ -5,8 +5,8 @@
 //! 下载任务通过后台 tokio task 异步执行,不阻塞 Tauri 命令返回。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
@@ -35,6 +35,60 @@ pub enum AppError {
     Network(String),
     #[error("配置错误: {0}")]
     Config(String),
+}
+
+// ---------------------------------------------------------------------------
+// URL 安全验证
+// ---------------------------------------------------------------------------
+
+/// 验证下载 URL 的安全性
+///
+/// 拒绝非 HTTP/HTTPS scheme、内网地址(RFC 1918/loopback/link-local)、
+/// 包含凭据的 URL,防止 SSRF 攻击。
+fn validate_download_url(url_str: &str) -> Result<(), String> {
+    let url = Url::parse(url_str).map_err(|e| format!("URL 格式无效: {e}"))?;
+
+    // 仅允许 http/https
+    match url.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(format!("不支持的协议: {scheme}，仅允许 http/https")),
+    }
+
+    // 拒绝包含用户名/密码的 URL(凭据注入)
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("URL 中不允许包含用户名或密码".into());
+    }
+
+    // 检查主机地址,拒绝内网/环回/link-local
+    if let Some(host) = url.host_str() {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            if ip.is_loopback() {
+                return Err("不允许访问环回地址".into());
+            }
+            if ip.is_unspecified() {
+                return Err("不允许访问未指定地址".into());
+            }
+            // 检查 RFC 1918 私有地址和 link-local
+            match ip {
+                std::net::IpAddr::V4(v4) => {
+                    if v4.is_private() || v4.is_link_local() {
+                        return Err("不允许访问内网地址".into());
+                    }
+                }
+                std::net::IpAddr::V6(v6) => {
+                    if v6.is_loopback() || v6.is_unspecified() {
+                        return Err("不允许访问 IPv6 环回/未指定地址".into());
+                    }
+                }
+            }
+        }
+        // 拒绝 localhost
+        if host == "localhost" {
+            return Err("不允许访问 localhost".into());
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -107,20 +161,7 @@ pub struct DownloadProgress {
     pub fragments_done: u32,
 }
 
-/// 嗅探到的可下载资源
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnifferResource {
-    /// 资源唯一标识
-    pub id: String,
-    /// 下载 URL
-    pub url: String,
-    /// 资源类型(字符串形式,如 "video"、"archive")
-    pub resource_type: String,
-    /// 文件名(从 URL 提取)
-    pub file_name: String,
-    /// 捕获时间(ISO 8601 本地时间)
-    pub captured_at: String,
-}
+use qf_sniffer::SnifferResource;
 
 /// 任务状态常量
 mod status {
@@ -195,6 +236,30 @@ fn dirs() -> Option<std::path::PathBuf> {
 /// 获取当前本地时间的 ISO 8601 字符串
 fn now_iso8601() -> String {
     Local::now().to_rfc3339()
+}
+
+/// 验证应用配置合法性
+///
+/// - `max_concurrent_tasks`: 1..=64
+/// - `max_concurrent_fragments`: 1..=32
+/// - `download_dir`: 非空字符串
+fn validate_config(config: &AppConfig) -> Result<(), String> {
+    if config.max_concurrent_tasks == 0 || config.max_concurrent_tasks > 64 {
+        return Err(format!(
+            "max_concurrent_tasks 必须在 1..=64 范围内,当前值: {}",
+            config.max_concurrent_tasks
+        ));
+    }
+    if config.max_concurrent_fragments == 0 || config.max_concurrent_fragments > 32 {
+        return Err(format!(
+            "max_concurrent_fragments 必须在 1..=32 范围内,当前值: {}",
+            config.max_concurrent_fragments
+        ));
+    }
+    if config.download_dir.is_empty() {
+        return Err("download_dir 不能为空".to_string());
+    }
+    Ok(())
 }
 
 /// 将 `ResourceType` 枚举转为可读字符串
@@ -296,6 +361,12 @@ async fn task_fn(
         let cfg = state.config.lock().await;
         cfg.max_concurrent_fragments as usize
     };
+    if max_concurrent == 0 {
+        tracing::error!(task_id = %task_id, "max_concurrent_fragments 为 0,无法创建信号量");
+        let mut store = state.tasks.lock().await;
+        update_task_status(&mut store, &task_id, status::FAILED);
+        return;
+    }
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
     let mut any_fragment_failed = false;
@@ -322,6 +393,7 @@ async fn task_fn(
         let frag_start = Instant::now();
         let mut frag_downloaded: u64 = 0;
 
+        let mut should_abort = false;
         for _ in 0..chunks {
             {
                 let store = state.tasks.lock().await;
@@ -329,10 +401,9 @@ async fn task_fn(
                     match task.status.as_str() {
                         status::CANCELLED => {
                             tracing::info!(task_id = %task_id, "任务已取消,退出后台下载");
-                            drop(store);
-                            drop(permit);
-                            state.active_permits.fetch_sub(1, Ordering::Relaxed);
-                            return;
+                            any_fragment_failed = true;
+                            should_abort = true;
+                            break;
                         }
                         status::PAUSED => {
                             tracing::info!(task_id = %task_id, "任务已暂停,等待恢复...");
@@ -342,7 +413,7 @@ async fn task_fn(
                 }
             }
 
-            {
+            if !should_abort {
                 let mut paused_iterations = 0u32;
                 loop {
                     let is_paused = state
@@ -357,14 +428,17 @@ async fn task_fn(
                     paused_iterations += 1;
                     if paused_iterations > 1500 {
                         tracing::warn!(task_id = %task_id, "暂停超时,标记任务失败");
+                        any_fragment_failed = true;
                         let mut store = state.tasks.lock().await;
                         update_task_status(&mut store, &task_id, status::FAILED);
-                        drop(permit);
-                        state.active_permits.fetch_sub(1, Ordering::Relaxed);
-                        return;
+                        should_abort = true;
+                        break;
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
+            }
+            if should_abort {
+                break;
             }
 
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -392,14 +466,20 @@ async fn task_fn(
             }
         }
 
+        // 统一释放分片许可(无论正常完成还是中止)
+        drop(permit);
+        state.active_permits.fetch_sub(1, Ordering::Relaxed);
+
+        if should_abort {
+            break;
+        }
+
         orchestrator.on_fragment_complete(frag, frag_start.elapsed());
         let fragments_done = orchestrator
             .active_fragments()
             .iter()
             .filter(|r| r.is_done())
             .count() as u32;
-        drop(permit);
-        state.active_permits.fetch_sub(1, Ordering::Relaxed);
 
         {
             let mut store = state.tasks.lock().await;
@@ -419,8 +499,14 @@ async fn task_fn(
     {
         let mut store = state.tasks.lock().await;
         if any_fragment_failed {
-            update_task_status(&mut store, &task_id, status::FAILED);
-            tracing::error!(task_id = %task_id, "部分分片下载失败");
+            // CANCELLED 优先于 FAILED:如果用户主动取消,保留 cancelled 状态
+            let current = store.get(&task_id).map(|t| t.status.as_str());
+            if current == Some(status::CANCELLED) {
+                tracing::info!(task_id = %task_id, "任务已被取消");
+            } else {
+                update_task_status(&mut store, &task_id, status::FAILED);
+                tracing::error!(task_id = %task_id, "部分分片下载失败");
+            }
         } else {
             if let Some(task) = store.get_mut(&task_id) {
                 task.progress = 1.0;
@@ -477,6 +563,7 @@ pub async fn create_task(
     url: String,
     download_dir: Option<String>,
 ) -> Result<String, String> {
+    validate_download_url(&url)?;
     let task_id = Uuid::new_v4().to_string();
     let file_name = extract_filename_from_url(&url);
     let created_at = now_iso8601();
@@ -563,7 +650,15 @@ pub async fn create_task(
             }
         };
 
-        task_fn(state_arc, tid, url_clone, download_dir_str, orchestrator, metadata).await;
+        task_fn(
+            state_arc,
+            tid,
+            url_clone,
+            download_dir_str,
+            orchestrator,
+            metadata,
+        )
+        .await;
     });
 
     {
@@ -638,10 +733,7 @@ async fn probe_metadata(url: &str) -> Result<FileMetadata, String> {
 /// 仅 `pending` 或 `downloading` 状态的任务可以暂停。
 /// 后台任务检测到暂停状态后将自旋等待恢复。
 #[tauri::command]
-pub async fn pause_task(
-    state: tauri::State<'_, AppState>,
-    task_id: String,
-) -> Result<(), String> {
+pub async fn pause_task(state: tauri::State<'_, AppState>, task_id: String) -> Result<(), String> {
     let mut store = state.tasks.lock().await;
 
     let task = store
@@ -664,10 +756,7 @@ pub async fn pause_task(
 /// 仅 `paused` 状态的任务可以恢复。
 /// 后台任务检测到状态恢复后将继续下载。
 #[tauri::command]
-pub async fn resume_task(
-    state: tauri::State<'_, AppState>,
-    task_id: String,
-) -> Result<(), String> {
+pub async fn resume_task(state: tauri::State<'_, AppState>, task_id: String) -> Result<(), String> {
     let mut store = state.tasks.lock().await;
 
     let task = store
@@ -688,10 +777,7 @@ pub async fn resume_task(
 /// 已完成或已取消的任务不可再次取消。
 /// 取消会中止后台下载任务并移除句柄。
 #[tauri::command]
-pub async fn cancel_task(
-    state: tauri::State<'_, AppState>,
-    task_id: String,
-) -> Result<(), String> {
+pub async fn cancel_task(state: tauri::State<'_, AppState>, task_id: String) -> Result<(), String> {
     let mut store = state.tasks.lock().await;
 
     let task = store
@@ -719,10 +805,7 @@ pub async fn cancel_task(
 /// 仅 `completed`、`cancelled` 或 `failed` 状态的任务可以删除。
 /// 活跃任务需先取消再删除。
 #[tauri::command]
-pub async fn delete_task(
-    state: tauri::State<'_, AppState>,
-    task_id: String,
-) -> Result<(), String> {
+pub async fn delete_task(state: tauri::State<'_, AppState>, task_id: String) -> Result<(), String> {
     let mut store = state.tasks.lock().await;
 
     let task = store
@@ -841,12 +924,19 @@ pub async fn add_sniffer_resource(state: &AppState, url: String) {
 
     let resource_type = identify_resource(&url);
     let file_name = extract_filename_from_url(&url);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let resource = SnifferResource {
         id: Uuid::new_v4().to_string(),
         url: url.clone(),
-        resource_type: resource_type_to_string(resource_type).to_string(),
         file_name,
-        captured_at: now_iso8601(),
+        resource_type: resource_type_to_string(resource_type).to_string(),
+        file_size: None,
+        content_type: None,
+        discovered_at: now,
+        source_page: None,
     };
 
     let mut store = state.sniffer.lock().await;
@@ -878,11 +968,13 @@ pub async fn get_config(state: tauri::State<'_, AppState>) -> Result<AppConfig, 
 /// 更新应用配置
 ///
 /// 前端传入完整的新配置,整体替换旧配置。
+/// 会验证 max_concurrent_tasks(1..=64)、max_concurrent_fragments(1..=32)、download_dir(非空)。
 #[tauri::command]
 pub async fn update_config(
     state: tauri::State<'_, AppState>,
     config: AppConfig,
 ) -> Result<(), String> {
+    validate_config(&config)?;
     let mut cfg = state.config.lock().await;
     *cfg = config;
     tracing::info!("应用配置已更新");
@@ -895,7 +987,11 @@ pub async fn update_config(
 
 #[cfg(test)]
 /// 创建下载任务(直接操作 AppState)
-async fn create_task_inner(state: &AppState, url: String, download_dir: Option<String>) -> Result<String, String> {
+async fn create_task_inner(
+    state: &AppState,
+    url: String,
+    download_dir: Option<String>,
+) -> Result<String, String> {
     let task_id = Uuid::new_v4().to_string();
     let file_name = extract_filename_from_url(&url);
     let created_at = now_iso8601();
@@ -982,7 +1078,15 @@ async fn create_task_inner(state: &AppState, url: String, download_dir: Option<S
             }
         };
 
-        task_fn(state_arc, tid, url_clone, download_dir_str, orchestrator, metadata).await;
+        task_fn(
+            state_arc,
+            tid,
+            url_clone,
+            download_dir_str,
+            orchestrator,
+            metadata,
+        )
+        .await;
     });
 
     {
@@ -1084,7 +1188,10 @@ async fn get_task_detail_inner(state: &AppState, task_id: String) -> Result<Task
 
 #[cfg(test)]
 /// 获取下载进度详情(直接操作 AppState)
-async fn get_download_progress_inner(state: &AppState, task_id: String) -> Result<DownloadProgress, String> {
+async fn get_download_progress_inner(
+    state: &AppState,
+    task_id: String,
+) -> Result<DownloadProgress, String> {
     let store = state.tasks.lock().await;
     let task = store
         .get(&task_id)
@@ -1132,6 +1239,7 @@ async fn get_config_inner(state: &AppState) -> Result<AppConfig, String> {
 #[cfg(test)]
 /// 更新应用配置(直接操作 AppState)
 async fn update_config_inner(state: &AppState, config: AppConfig) -> Result<(), String> {
+    validate_config(&config)?;
     let mut cfg = state.config.lock().await;
     *cfg = config;
     Ok(())
@@ -1169,7 +1277,9 @@ mod tests {
     #[tokio::test]
     async fn test_create_task_returns_valid_uuid() {
         let state = test_state();
-        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None).await.unwrap();
+        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None)
+            .await
+            .unwrap();
         assert!(Uuid::parse_str(&id).is_ok());
     }
 
@@ -1190,7 +1300,9 @@ mod tests {
     #[tokio::test]
     async fn test_create_task_default_status_is_pending() {
         let state = test_state();
-        let id = create_task_inner(&state, "https://example.com/data.bin".to_string(), None).await.unwrap();
+        let id = create_task_inner(&state, "https://example.com/data.bin".to_string(), None)
+            .await
+            .unwrap();
         let task = get_task_detail_inner(&state, id).await.unwrap();
         assert_eq!(task.status, "pending");
         assert_eq!(task.downloaded, 0);
@@ -1215,8 +1327,11 @@ mod tests {
     #[tokio::test]
     async fn test_create_task_duplicate_url_rejected() {
         let state = test_state();
-        let _ = create_task_inner(&state, "https://dup.example.com/once.zip".to_string(), None).await.unwrap();
-        let result = create_task_inner(&state, "https://dup.example.com/once.zip".to_string(), None).await;
+        let _ = create_task_inner(&state, "https://dup.example.com/once.zip".to_string(), None)
+            .await
+            .unwrap();
+        let result =
+            create_task_inner(&state, "https://dup.example.com/once.zip".to_string(), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("已存在"));
     }
@@ -1226,7 +1341,9 @@ mod tests {
     #[tokio::test]
     async fn test_pause_pending_task() {
         let state = test_state();
-        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None).await.unwrap();
+        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None)
+            .await
+            .unwrap();
         pause_task_inner(&state, id.clone()).await.unwrap();
         let task = get_task_detail_inner(&state, id).await.unwrap();
         assert_eq!(task.status, "paused");
@@ -1236,7 +1353,9 @@ mod tests {
     #[tokio::test]
     async fn test_resume_paused_task() {
         let state = test_state();
-        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None).await.unwrap();
+        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None)
+            .await
+            .unwrap();
         pause_task_inner(&state, id.clone()).await.unwrap();
         resume_task_inner(&state, id.clone()).await.unwrap();
         let task = get_task_detail_inner(&state, id).await.unwrap();
@@ -1246,7 +1365,9 @@ mod tests {
     #[tokio::test]
     async fn test_pause_already_paused_task_fails() {
         let state = test_state();
-        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None).await.unwrap();
+        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None)
+            .await
+            .unwrap();
         pause_task_inner(&state, id.clone()).await.unwrap();
         let result = pause_task_inner(&state, id).await;
         assert!(result.is_err());
@@ -1256,7 +1377,9 @@ mod tests {
     #[tokio::test]
     async fn test_resume_non_paused_task_fails() {
         let state = test_state();
-        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None).await.unwrap();
+        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None)
+            .await
+            .unwrap();
         let result = resume_task_inner(&state, id).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("仅暂停状态可恢复"));
@@ -1267,7 +1390,9 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_pending_task() {
         let state = test_state();
-        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None).await.unwrap();
+        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None)
+            .await
+            .unwrap();
         cancel_task_inner(&state, id.clone()).await.unwrap();
         let task = get_task_detail_inner(&state, id).await.unwrap();
         assert_eq!(task.status, "cancelled");
@@ -1276,7 +1401,9 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_already_cancelled_task_fails() {
         let state = test_state();
-        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None).await.unwrap();
+        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None)
+            .await
+            .unwrap();
         cancel_task_inner(&state, id.clone()).await.unwrap();
         let result = cancel_task_inner(&state, id).await;
         assert!(result.is_err());
@@ -1288,7 +1415,9 @@ mod tests {
     #[tokio::test]
     async fn test_delete_cancelled_task() {
         let state = test_state();
-        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None).await.unwrap();
+        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None)
+            .await
+            .unwrap();
         cancel_task_inner(&state, id.clone()).await.unwrap();
         delete_task_inner(&state, id.clone()).await.unwrap();
         assert!(get_task_detail_inner(&state, id).await.is_err());
@@ -1297,7 +1426,9 @@ mod tests {
     #[tokio::test]
     async fn test_delete_pending_task_fails() {
         let state = test_state();
-        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None).await.unwrap();
+        let id = create_task_inner(&state, "https://example.com/file.zip".to_string(), None)
+            .await
+            .unwrap();
         let result = delete_task_inner(&state, id.clone()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("不允许删除"));
@@ -1308,8 +1439,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_task_list_returns_all_tasks() {
         let state = test_state();
-        let id1 = create_task_inner(&state, "https://example.com/a.zip".to_string(), None).await.unwrap();
-        let id2 = create_task_inner(&state, "https://example.com/b.zip".to_string(), None).await.unwrap();
+        let id1 = create_task_inner(&state, "https://example.com/a.zip".to_string(), None)
+            .await
+            .unwrap();
+        let id2 = create_task_inner(&state, "https://example.com/b.zip".to_string(), None)
+            .await
+            .unwrap();
         let list = get_task_list_inner(&state).await.unwrap();
         let ids: Vec<&String> = list.iter().map(|t| &t.id).collect();
         assert!(ids.contains(&&id1));
@@ -1416,17 +1551,47 @@ mod tests {
     #[tokio::test]
     async fn test_full_task_lifecycle() {
         let state = test_state();
-        let id = create_task_inner(&state, "https://example.com/lifecycle.bin".to_string(), None).await.unwrap();
-        assert_eq!(get_task_detail_inner(&state, id.clone()).await.unwrap().status, "pending");
+        let id = create_task_inner(
+            &state,
+            "https://example.com/lifecycle.bin".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get_task_detail_inner(&state, id.clone())
+                .await
+                .unwrap()
+                .status,
+            "pending"
+        );
 
         pause_task_inner(&state, id.clone()).await.unwrap();
-        assert_eq!(get_task_detail_inner(&state, id.clone()).await.unwrap().status, "paused");
+        assert_eq!(
+            get_task_detail_inner(&state, id.clone())
+                .await
+                .unwrap()
+                .status,
+            "paused"
+        );
 
         resume_task_inner(&state, id.clone()).await.unwrap();
-        assert_eq!(get_task_detail_inner(&state, id.clone()).await.unwrap().status, "downloading");
+        assert_eq!(
+            get_task_detail_inner(&state, id.clone())
+                .await
+                .unwrap()
+                .status,
+            "downloading"
+        );
 
         cancel_task_inner(&state, id.clone()).await.unwrap();
-        assert_eq!(get_task_detail_inner(&state, id.clone()).await.unwrap().status, "cancelled");
+        assert_eq!(
+            get_task_detail_inner(&state, id.clone())
+                .await
+                .unwrap()
+                .status,
+            "cancelled"
+        );
 
         delete_task_inner(&state, id.clone()).await.unwrap();
         assert!(get_task_detail_inner(&state, id).await.is_err());
@@ -1437,8 +1602,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_download_progress() {
         let state = test_state();
-        let id = create_task_inner(&state, "https://example.com/progress.bin".to_string(), None).await.unwrap();
-        let progress = get_download_progress_inner(&state, id.clone()).await.unwrap();
+        let id = create_task_inner(&state, "https://example.com/progress.bin".to_string(), None)
+            .await
+            .unwrap();
+        let progress = get_download_progress_inner(&state, id.clone())
+            .await
+            .unwrap();
         assert_eq!(progress.task_id, id);
         assert_eq!(progress.status, "pending");
         assert!((progress.progress - 0.0).abs() < f64::EPSILON);
@@ -1488,7 +1657,9 @@ mod tests {
     #[tokio::test]
     async fn test_add_sniffer_filter() {
         let state = test_state();
-        add_sniffer_filter_inner(&state, "cdn.example.com".to_string()).await.unwrap();
+        add_sniffer_filter_inner(&state, "cdn.example.com".to_string())
+            .await
+            .unwrap();
         let result = add_sniffer_filter_inner(&state, "cdn.example.com".to_string()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("已存在"));
@@ -1525,7 +1696,9 @@ mod tests {
     #[tokio::test]
     async fn test_add_sniffer_resource_with_filter() {
         let state = test_state();
-        add_sniffer_filter_inner(&state, "cdn.example.com".to_string()).await.unwrap();
+        add_sniffer_filter_inner(&state, "cdn.example.com".to_string())
+            .await
+            .unwrap();
         add_sniffer_resource(&state, "http://other.com/video.mp4".to_string()).await;
         assert_eq!(get_sniffer_resources_inner(&state).await.unwrap().len(), 0);
         add_sniffer_resource(&state, "http://cdn.example.com/video.mp4".to_string()).await;
@@ -1673,6 +1846,161 @@ mod tests {
         assert!(
             result.unwrap_err().contains("最大并发任务数"),
             "错误信息应提及并发限制"
+        );
+    }
+
+    // -- validate_config 测试 --
+
+    #[tokio::test]
+    async fn test_update_config_rejects_zero_max_concurrent_tasks() {
+        let state = test_state();
+        let result = update_config_inner(
+            &state,
+            AppConfig {
+                download_dir: "/tmp".to_string(),
+                max_concurrent_tasks: 0,
+                max_concurrent_fragments: 16,
+                max_connections_per_host: 16,
+                enable_quic: false,
+                verify_checksum: true,
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("max_concurrent_tasks"));
+    }
+
+    #[tokio::test]
+    async fn test_update_config_rejects_zero_max_concurrent_fragments() {
+        let state = test_state();
+        let result = update_config_inner(
+            &state,
+            AppConfig {
+                download_dir: "/tmp".to_string(),
+                max_concurrent_tasks: 5,
+                max_concurrent_fragments: 0,
+                max_connections_per_host: 16,
+                enable_quic: false,
+                verify_checksum: true,
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("max_concurrent_fragments"));
+    }
+
+    #[tokio::test]
+    async fn test_update_config_rejects_too_large_tasks() {
+        let state = test_state();
+        let result = update_config_inner(
+            &state,
+            AppConfig {
+                download_dir: "/tmp".to_string(),
+                max_concurrent_tasks: 65,
+                max_concurrent_fragments: 16,
+                max_connections_per_host: 16,
+                enable_quic: false,
+                verify_checksum: true,
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("max_concurrent_tasks"));
+    }
+
+    #[tokio::test]
+    async fn test_update_config_rejects_too_large_fragments() {
+        let state = test_state();
+        let result = update_config_inner(
+            &state,
+            AppConfig {
+                download_dir: "/tmp".to_string(),
+                max_concurrent_tasks: 5,
+                max_concurrent_fragments: 33,
+                max_connections_per_host: 16,
+                enable_quic: false,
+                verify_checksum: true,
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("max_concurrent_fragments"));
+    }
+
+    #[tokio::test]
+    async fn test_update_config_rejects_empty_download_dir() {
+        let state = test_state();
+        let result = update_config_inner(
+            &state,
+            AppConfig {
+                download_dir: String::new(),
+                max_concurrent_tasks: 5,
+                max_concurrent_fragments: 16,
+                max_connections_per_host: 16,
+                enable_quic: false,
+                verify_checksum: true,
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("download_dir"));
+    }
+
+    #[tokio::test]
+    async fn test_update_config_accepts_valid_boundary_values() {
+        let state = test_state();
+        // 边界值:最小值
+        let result = update_config_inner(
+            &state,
+            AppConfig {
+                download_dir: "/tmp".to_string(),
+                max_concurrent_tasks: 1,
+                max_concurrent_fragments: 1,
+                max_connections_per_host: 1,
+                enable_quic: false,
+                verify_checksum: true,
+            },
+        )
+        .await;
+        assert!(result.is_ok());
+
+        // 边界值:最大值
+        let result = update_config_inner(
+            &state,
+            AppConfig {
+                download_dir: "/tmp".to_string(),
+                max_concurrent_tasks: 64,
+                max_concurrent_fragments: 32,
+                max_connections_per_host: 16,
+                enable_quic: false,
+                verify_checksum: true,
+            },
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    // -- 信号量 max_concurrent=0 保护测试 --
+
+    #[tokio::test]
+    async fn test_zero_max_concurrent_fragments_marks_task_failed() {
+        let state = test_state();
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.max_concurrent_fragments = 0;
+        }
+        // task_fn 会在 max_concurrent==0 时标记任务为 FAILED 并返回
+        // 这里通过 create_task_inner 触发,验证任务最终变为 failed
+        // 注意:probe_metadata 可能失败(网络不可达),但任务仍应变为 failed
+        let id = create_task_inner(&state, "http://example.com/zero-sem.bin".into(), None)
+            .await
+            .unwrap();
+        // 等待后台任务完成(probe_metadata 失败 或 max_concurrent==0)
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let task = get_task_detail_inner(&state, id).await.unwrap();
+        assert_eq!(
+            task.status, "failed",
+            "max_concurrent_fragments=0 时任务应标记为 failed"
         );
     }
 }

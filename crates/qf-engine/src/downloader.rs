@@ -184,11 +184,12 @@ impl DownloadTask {
     pub async fn new(url: String, config: DownloadConfig) -> QfResult<Self> {
         let _parsed = url::Url::parse(&url)?;
 
-        let protocol: Arc<dyn Protocol> = if url.starts_with("http://") || url.starts_with("https://") {
-            Arc::new(HttpClient::new()?)
-        } else {
-            return Err(QfError::Config(format!("不支持的协议: {url}")));
-        };
+        let protocol: Arc<dyn Protocol> =
+            if url.starts_with("http://") || url.starts_with("https://") {
+                Arc::new(HttpClient::new()?)
+            } else {
+                return Err(QfError::Config(format!("不支持的协议: {url}")));
+            };
         let storage_path = std::path::Path::new(&config.download_dir).join("qf_temp_download");
         let storage = Arc::new(StorageKind::open(&storage_path).await?);
 
@@ -245,7 +246,8 @@ impl DownloadTask {
             "探测完成"
         );
         self.metadata = Some(metadata);
-        self.metadata.as_ref()
+        self.metadata
+            .as_ref()
             .ok_or_else(|| QfError::Config("探测完成但元数据未填充".into()))
     }
 
@@ -910,8 +912,7 @@ mod tests {
             hash: Some(hash),
         };
 
-        let protocol =
-            Arc::new(MockProto::new(test_metadata("v.bin", data.len() as u64)));
+        let protocol = Arc::new(MockProto::new(test_metadata("v.bin", data.len() as u64)));
         let storage = StorageKind::memory_with_capacity(data.len());
 
         let mut task = make_task(
@@ -947,8 +948,7 @@ mod tests {
             hash: Some(wrong_hash.into()),
         };
 
-        let protocol =
-            Arc::new(MockProto::new(test_metadata("c.bin", data.len() as u64)));
+        let protocol = Arc::new(MockProto::new(test_metadata("c.bin", data.len() as u64)));
         let storage = StorageKind::memory_with_capacity(data.len());
 
         let mut task = make_task(
@@ -966,7 +966,10 @@ mod tests {
 
         let result = task.verify().await;
         assert!(result.is_err(), "哈希不匹配时校验应失败");
-        assert!(matches!(result.unwrap_err(), QfError::ChecksumMismatch { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            QfError::ChecksumMismatch { .. }
+        ));
         assert_eq!(task.state(), DownloadState::Failed);
     }
 

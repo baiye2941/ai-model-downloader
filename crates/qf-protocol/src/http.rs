@@ -45,7 +45,10 @@ impl HttpClient {
 // Default 实现已移除 — TLS 初始化可能失败,请使用 HttpClient::new()
 
 impl Protocol for HttpClient {
-    fn probe(&self, url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
+    fn probe(
+        &self,
+        url: &str,
+    ) -> Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
         let client = self.client.clone();
         let url = url.to_owned();
         Box::pin(async move {
@@ -61,7 +64,9 @@ impl Protocol for HttpClient {
             }
 
             let headers = response.headers();
-            let content_disposition = headers.get("content-disposition").and_then(|v| v.to_str().ok());
+            let content_disposition = headers
+                .get("content-disposition")
+                .and_then(|v| v.to_str().ok());
             let file_name = extract_filename(&url, content_disposition);
             let file_size = headers
                 .get("content-length")
@@ -96,7 +101,12 @@ impl Protocol for HttpClient {
         })
     }
 
-    fn download_range(&self, url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+    fn download_range(
+        &self,
+        url: &str,
+        start: u64,
+        end: u64,
+    ) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
         let client = self.client.clone();
         let url = url.to_owned();
         Box::pin(async move {
@@ -125,7 +135,12 @@ impl Protocol for HttpClient {
         })
     }
 
-    fn download_range_stream(&self, url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+    fn download_range_stream(
+        &self,
+        url: &str,
+        start: u64,
+        end: u64,
+    ) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
         let client = self.client.clone();
         let url = url.to_owned();
         Box::pin(async move {
@@ -154,7 +169,10 @@ impl Protocol for HttpClient {
         })
     }
 
-    fn download_full(&self, url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+    fn download_full(
+        &self,
+        url: &str,
+    ) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
         let client = self.client.clone();
         let url = url.to_owned();
         Box::pin(async move {
@@ -192,10 +210,7 @@ mod tests {
 
     #[test]
     fn test_extract_filename_from_url_root() {
-        assert_eq!(
-            extract_filename("http://example.com/", None),
-            "unknown"
-        );
+        assert_eq!(extract_filename("http://example.com/", None), "unknown");
     }
 
     #[test]

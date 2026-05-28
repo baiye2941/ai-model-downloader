@@ -38,7 +38,8 @@ fn recovery() {
             completed_fragments: vec![0, 1],
             total_fragments: 4,
             status: "downloading".into(),
-        }).unwrap();
+        })
+        .unwrap();
         mgr.save_task(&TaskRecord {
             task_id: "t2".into(),
             url: "https://example.com/b.zip".into(),
@@ -48,7 +49,8 @@ fn recovery() {
             completed_fragments: vec![0, 1, 2, 3],
             total_fragments: 4,
             status: "completed".into(),
-        }).unwrap();
+        })
+        .unwrap();
         mgr.save_task(&TaskRecord {
             task_id: "t3".into(),
             url: "https://example.com/c.zip".into(),
@@ -58,7 +60,8 @@ fn recovery() {
             completed_fragments: vec![0],
             total_fragments: 8,
             status: "paused".into(),
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     // 阶段 2:模拟重启,从存储中恢复
@@ -82,4 +85,3 @@ fn recovery() {
         assert_eq!(completed.status, "completed");
     }
 }
-

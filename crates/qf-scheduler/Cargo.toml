@@ -7,8 +7,6 @@ description = "QuantumFetch 调度层:智能调度、带宽分配、预测"
 
 [dependencies]
 qf-core = { path = "../qf-core" }
-qf-engine = { path = "../qf-engine" }
-qf-p2sp = { path = "../qf-p2sp" }
 tokio.workspace = true
 tracing.workspace = true
 

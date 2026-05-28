@@ -282,7 +282,10 @@ mod tests {
 
         // 验证对齐 helper 逻辑
         let data_len = 256u64;
-        assert!(!data_len.is_multiple_of(sector_size), "256 不应是 512 的倍数");
+        assert!(
+            !data_len.is_multiple_of(sector_size),
+            "256 不应是 512 的倍数"
+        );
         let aligned_len = 512u64;
         assert!(aligned_len.is_multiple_of(sector_size));
     }

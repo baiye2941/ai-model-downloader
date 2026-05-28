@@ -251,14 +251,16 @@ fn parse_head_response(response: &str, url: &str) -> QfResult<FileMetadata> {
                     last_modified = Some(value_trimmed.to_string());
                 }
                 "content-disposition" => {
-                    content_disposition_name = qf_core::filename::parse_content_disposition(value_trimmed);
+                    content_disposition_name =
+                        qf_core::filename::parse_content_disposition(value_trimmed);
                 }
                 _ => {}
             }
         }
     }
 
-    let file_name = content_disposition_name.unwrap_or_else(|| qf_core::filename::extract_filename_from_url(url));
+    let file_name = content_disposition_name
+        .unwrap_or_else(|| qf_core::filename::extract_filename_from_url(url));
 
     Ok(FileMetadata {
         file_name,
@@ -320,7 +322,9 @@ async fn send_request(conn: &quinn::Connection, request: &[u8]) -> QfResult<Vec<
     send.finish()
         .map_err(|e| QfError::Network(format!("关闭发送流失败: {e}")))?;
 
-    recv.read_to_end(1024 * 1024) // 最大 1MB 响应
+    // 分片下载可能返回大量数据,设置 256MB 上限
+    // TODO: 改为流式读取(循环 recv.read() 直到 EOF),消除硬性上限
+    recv.read_to_end(256 * 1024 * 1024)
         .await
         .map_err(|e| QfError::Network(format!("读取响应数据失败: {e}")))
 }
@@ -460,7 +464,10 @@ impl rustls::client::danger::ServerCertVerifier for InsecureVerifier {
 // ---------------------------------------------------------------------------
 
 impl Protocol for QuicTransport {
-    fn probe(&self, url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
+    fn probe(
+        &self,
+        url: &str,
+    ) -> Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
         let conn = match self.require_connection() {
             Ok(c) => c.clone(),
             Err(e) => return Box::pin(async move { Err(e) }),
@@ -474,7 +481,12 @@ impl Protocol for QuicTransport {
         })
     }
 
-    fn download_range(&self, url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+    fn download_range(
+        &self,
+        url: &str,
+        start: u64,
+        end: u64,
+    ) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
         let conn = match self.require_connection() {
             Ok(c) => c.clone(),
             Err(e) => return Box::pin(async move { Err(e) }),
@@ -487,7 +499,12 @@ impl Protocol for QuicTransport {
         })
     }
 
-    fn download_range_stream(&self, url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+    fn download_range_stream(
+        &self,
+        url: &str,
+        start: u64,
+        end: u64,
+    ) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
         let conn = match self.require_connection() {
             Ok(c) => c.clone(),
             Err(e) => return Box::pin(async move { Err(e) }),
@@ -500,7 +517,10 @@ impl Protocol for QuicTransport {
         })
     }
 
-    fn download_full(&self, url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+    fn download_full(
+        &self,
+        url: &str,
+    ) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
         let conn = match self.require_connection() {
             Ok(c) => c.clone(),
             Err(e) => return Box::pin(async move { Err(e) }),
@@ -831,10 +851,7 @@ mod tests {
 
     #[test]
     fn test_extract_filename_from_url_root() {
-        assert_eq!(
-            extract_filename_from_url("https://example.com/"),
-            "unknown"
-        );
+        assert_eq!(extract_filename_from_url("https://example.com/"), "unknown");
     }
 
     #[test]

@@ -3,7 +3,6 @@
 //! 管理单个分片的生命周期:Pending -> Downloading -> Verifying -> Writing -> Done
 //! 支持失败重试(指数退避)和 EWMA 带宽追踪。
 
-use std::collections::VecDeque;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -139,8 +138,8 @@ impl FragmentRecord {
 pub struct BandwidthTracker {
     ewma: f64,
     alpha: f64,
-    samples: VecDeque<u64>,
-    max_samples: usize,
+    /// 已记录的采样总数(仅计数,不存储历史样本,节省内存)
+    sample_count: usize,
 }
 
 impl BandwidthTracker {
@@ -150,8 +149,7 @@ impl BandwidthTracker {
         Self {
             ewma: 0.0,
             alpha: alpha.clamp(0.0, 1.0),
-            samples: VecDeque::new(),
-            max_samples: 1000,
+            sample_count: 0,
         }
     }
 
@@ -160,11 +158,8 @@ impl BandwidthTracker {
         if bytes_per_sec == 0 {
             return;
         }
-        if self.samples.len() >= self.max_samples {
-            self.samples.pop_front();
-        }
-        self.samples.push_back(bytes_per_sec);
-        if self.samples.len() == 1 {
+        self.sample_count += 1;
+        if self.sample_count == 1 {
             self.ewma = bytes_per_sec as f64;
         } else {
             self.ewma = self.alpha * bytes_per_sec as f64 + (1.0 - self.alpha) * self.ewma;
@@ -178,7 +173,7 @@ impl BandwidthTracker {
 
     /// 获取采样数
     pub fn sample_count(&self) -> usize {
-        self.samples.len()
+        self.sample_count
     }
 }
 

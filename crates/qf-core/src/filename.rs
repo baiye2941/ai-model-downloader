@@ -45,9 +45,11 @@ pub fn parse_content_disposition(value: &str) -> Option<String> {
     if let Some(pos) = value.find("filename*=") {
         let rest = &value[pos + 10..];
         if let Some(encoded) = rest.split(';').next() {
-            let parts: Vec<&str> = encoded.splitn(3, '\'').collect();
-            if parts.len() == 3
-                && let Some(decoded) = percent_decode(parts[2])
+            let mut parts = encoded.splitn(3, '\'');
+            let _charset = parts.next(); // 编码名称(如 UTF-8),当前不使用
+            let _encoding = parts.next(); // 编码方式(如 '', 当前不使用
+            if let Some(encoded_name) = parts.next()
+                && let Some(decoded) = percent_decode(encoded_name)
                 && !decoded.is_empty()
             {
                 return Some(decoded);
@@ -262,7 +264,10 @@ mod tests {
 
     #[test]
     fn test_percent_decode_multi_byte_utf8() {
-        assert_eq!(percent_decode("%E4%B8%AD%E6%96%87"), Some("中文".to_string()));
+        assert_eq!(
+            percent_decode("%E4%B8%AD%E6%96%87"),
+            Some("中文".to_string())
+        );
     }
 
     #[test]

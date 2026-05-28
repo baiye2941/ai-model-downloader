@@ -5,9 +5,9 @@ pub mod commands;
 pub use commands::AppError;
 
 use commands::{
-    add_sniffer_filter, cancel_task, create_task, delete_task, get_app_info, get_config,
+    AppState, add_sniffer_filter, cancel_task, create_task, delete_task, get_app_info, get_config,
     get_download_progress, get_sniffer_resources, get_task_detail, get_task_list, pause_task,
-    resume_task, supported_protocols, update_config, AppState,
+    resume_task, supported_protocols, update_config,
 };
 
 /// 构建并运行 Tauri 应用
@@ -48,9 +48,7 @@ pub fn run() {
 #[cfg(test)]
 #[tokio::test]
 async fn any_fragment() {
-    use std::collections::HashMap;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     let state = Arc::new(AppState::new());
     let task_id = uuid::Uuid::new_v4().to_string();
@@ -85,7 +83,7 @@ async fn any_fragment() {
 #[cfg(test)]
 #[tokio::test]
 async fn max_concurrent() {
-    use commands::{AppConfig, TaskInfo};
+    use commands::TaskInfo;
 
     let state = AppState::new();
     {
@@ -144,7 +142,10 @@ fn app_error() {
     let already_exists = AppError::TaskAlreadyExists("task-1".into());
     assert_eq!(format!("{already_exists}"), "任务已存在: task-1");
     let json = serde_json::to_string(&already_exists).unwrap();
-    assert!(json.contains("TaskAlreadyExists"), "序列化应包含变体名: {json}");
+    assert!(
+        json.contains("TaskAlreadyExists"),
+        "序列化应包含变体名: {json}"
+    );
 
     let network = AppError::Network("连接超时".into());
     assert_eq!(format!("{network}"), "网络错误: 连接超时");

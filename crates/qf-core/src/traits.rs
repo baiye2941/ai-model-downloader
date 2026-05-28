@@ -42,8 +42,7 @@ pub trait Protocol: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = QfResult<Bytes>> + Send>>;
 
     /// 下载整个文件(不支持 Range 时使用)
-    fn download_full(&self, url: &str)
-    -> Pin<Box<dyn Future<Output = QfResult<Bytes>> + Send>>;
+    fn download_full(&self, url: &str) -> Pin<Box<dyn Future<Output = QfResult<Bytes>> + Send>>;
 }
 
 /// 存储层 trait:负责数据持久化

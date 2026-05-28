@@ -151,8 +151,8 @@ fn align_buffer_size(size: usize, align: usize) -> usize {
 #[cfg(target_os = "linux")]
 fn aligned_alloc(size: usize, align: usize) -> Vec<u8> {
     let aligned_size = align_buffer_size(size, align);
-    let layout = std::alloc::Layout::from_size_align(aligned_size, align)
-        .expect("无效的对齐分配布局");
+    let layout =
+        std::alloc::Layout::from_size_align(aligned_size, align).expect("无效的对齐分配布局");
     // Safety: layout 非零且有效,由 Layout::from_size_align 保证
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     if ptr.is_null() {
@@ -290,15 +290,15 @@ impl IoUringStorage {
     /// 提交后阻塞等待 CQE 返回,获取实际写入字节数。
     #[cfg(target_os = "linux")]
     async fn submit_write(&self, offset: u64, data: &[u8]) -> QfResult<usize> {
-        // TODO: 实际 io_uring 写入逻辑
-        // 1. 从 buffer 池获取一个 fixed buffer 索引
-        // 2. 将 data 拷贝到 fixed buffer (唯一的一次用户态拷贝)
-        // 3. 构造 WRITE_FIXED SQE
-        // 4. 提交到 SQ
-        // 5. 等待 CQE 完成事件
-        // 6. 释放 buffer 索引
+        // 暂未实现原因:io_uring 异步提交需要独立的完成事件循环线程,
+        // 当前阶段优先使用 tokio::fs 路径验证下载管线正确性。
+        // 待 Linux CI 环境就绪后实现:buffer 池管理 + SQE 构造 + CQE 等待。
+        // TODO: 实现 io_uring SQE/CQE 生命周期管理(Linux CI 就绪后)
         let _ = (offset, data);
-        todo!("io_uring 写入将在 Linux 环境实现")
+        Err(QfError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "io_uring 写入尚未实现,请使用 TokioFile",
+        )))
     }
 }
 
@@ -333,10 +333,15 @@ impl AsyncStorage for IoUringStorage {
     async fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> QfResult<usize> {
         match self.state {
             IoUringState::Ready => {
-                // TODO: 使用 io_uring READ_FIXED 实现零拷贝读取
+                // 暂未实现原因:READ_FIXED 需要配合 fixed buffer 池管理,
+                // 当前优先实现写入路径,读取路径在 Linux CI 中验证后补全。
                 #[cfg(target_os = "linux")]
                 {
-                    todo!("io_uring 读取将在 Linux 环境实现")
+                    // TODO: 实现 io_uring READ_FIXED 零拷贝读取(需 fixed buffer 池管理)
+                    Err(QfError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "io_uring 读取尚未实现,请使用 TokioFile",
+                    )))
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
@@ -353,10 +358,15 @@ impl AsyncStorage for IoUringStorage {
     async fn sync(&self) -> QfResult<()> {
         match self.state {
             IoUringState::Ready => {
-                // TODO: 使用 io_uring FSYNC 实现高效同步
+                // 暂未实现原因:io_uring FSYNC 操作需要与 SQE 提交循环集成,
+                // 当前通过 tokio::fs::File::sync_all() 作为后备方案。
                 #[cfg(target_os = "linux")]
                 {
-                    todo!("io_uring 同步将在 Linux 环境实现")
+                    // TODO: 实现 io_uring FSYNC SQE 提交(需集成事件循环)
+                    Err(QfError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "io_uring 同步尚未实现,请使用 TokioFile",
+                    )))
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
@@ -373,11 +383,17 @@ impl AsyncStorage for IoUringStorage {
     async fn allocate(&self, size: u64) -> QfResult<()> {
         match self.state {
             IoUringState::Ready => {
-                // TODO: 使用 fallocate 或 io_uring FALLOCATE 操作
+                // 暂未实现原因:fallocate 预分配需要调用 io_uring FALLOCATE 操作码,
+                // 或者直接使用 libc::fallocate,需要与文件描述符生命周期配合。
+                // 当前使用标准文件写入按需扩展,待性能测试确认瓶颈后实现。
                 #[cfg(target_os = "linux")]
                 {
+                    // TODO: 实现 fallocate 或 io_uring FALLOCATE 操作
                     let _ = size;
-                    todo!("io_uring 空间预分配将在 Linux 环境实现")
+                    Err(QfError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "io_uring 空间预分配尚未实现,请使用 TokioFile",
+                    )))
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
@@ -622,7 +638,10 @@ mod tests {
     fn test_aligned_alloc_address_alignment() {
         let buf = aligned_alloc(1024, 512);
         assert_eq!(buf.len(), 1024);
-        assert!(buf.as_ptr() as usize % 512 == 0, "buffer 地址未按 512 字节对齐");
+        assert!(
+            (buf.as_ptr() as usize).is_multiple_of(512),
+            "buffer 地址未按 512 字节对齐"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -650,13 +669,13 @@ mod tests {
         let size_512 = 100usize;
         let aligned_512 = (size_512 + 511) & !511;
         assert_eq!(aligned_512, 512);
-        assert!(aligned_512 % 512 == 0);
+        assert!(aligned_512.is_multiple_of(512));
 
         // 4096 字节对齐(O_DIRECT 要求)
         let size_4k = 1000usize;
         let aligned_4k = (size_4k + 4095) & !4095;
         assert_eq!(aligned_4k, 4096);
-        assert!(aligned_4k % 4096 == 0);
+        assert!(aligned_4k.is_multiple_of(4096));
 
         // 已对齐的大小不变
         assert_eq!((4096usize + 4095) & !4095, 4096);
@@ -664,7 +683,10 @@ mod tests {
 
         // 默认 buffer_size 64KB 也应是 4096 的倍数
         let default_size = 64 * 1024usize;
-        assert_eq!(default_size % 4096, 0, "默认 buffer_size 应为 4096 对齐");
+        assert!(
+            default_size.is_multiple_of(4096),
+            "默认 buffer_size 应为 4096 对齐"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -672,6 +694,9 @@ mod tests {
     fn test_aligned_alloc_buffer_align() {
         let buf = aligned_alloc(1024, 4096);
         assert_eq!(buf.len(), 1024);
-        assert_eq!(buf.as_ptr() as usize % 4096, 0, "buffer 地址应按 4096 对齐");
+        assert!(
+            (buf.as_ptr() as usize).is_multiple_of(4096),
+            "buffer 地址应按 4096 对齐"
+        );
     }
 }

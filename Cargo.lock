@@ -3214,8 +3214,6 @@ name = "qf-scheduler"
 version = "0.1.0"
 dependencies = [
  "qf-core",
- "qf-engine",
- "qf-p2sp",
  "tokio",
  "tokio-test",
  "tracing",

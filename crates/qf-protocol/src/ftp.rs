@@ -366,7 +366,10 @@ struct FtpUrl {
 }
 
 impl Protocol for FtpClient {
-    fn probe(&self, url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
+    fn probe(
+        &self,
+        url: &str,
+    ) -> Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
         let url = url.to_owned();
         let this = self.clone();
         Box::pin(async move {
@@ -396,7 +399,12 @@ impl Protocol for FtpClient {
         })
     }
 
-    fn download_range(&self, url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+    fn download_range(
+        &self,
+        url: &str,
+        start: u64,
+        end: u64,
+    ) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
         let url = url.to_owned();
         let this = self.clone();
         Box::pin(async move {
@@ -418,15 +426,21 @@ impl Protocol for FtpClient {
         })
     }
 
-    fn download_range_stream(&self, url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+    fn download_range_stream(
+        &self,
+        url: &str,
+        start: u64,
+        end: u64,
+    ) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
         let url = url.to_owned();
         let this = self.clone();
-        Box::pin(async move {
-            this.download_range(&url, start, end).await
-        })
+        Box::pin(async move { this.download_range(&url, start, end).await })
     }
 
-    fn download_full(&self, url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+    fn download_full(
+        &self,
+        url: &str,
+    ) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
         let url = url.to_owned();
         let this = self.clone();
         Box::pin(async move {
