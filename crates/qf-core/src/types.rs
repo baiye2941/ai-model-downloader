@@ -60,15 +60,16 @@ pub struct FragmentInfo {
     pub hash: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskProgress {
     pub downloaded: u64,
     pub speed: u64,
+    /// 进度百分比(0.0 ~ 1.0)
     pub progress: f64,
     pub fragments_done: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadStateChange {
     pub task_id: String,
     pub new_state: DownloadState,

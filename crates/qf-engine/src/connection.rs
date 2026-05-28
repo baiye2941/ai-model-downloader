@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::Semaphore;
 
 use qf_core::QfError;
+use qf_core::config::ConnectionConfig;
 
 /// 连接池配置
 #[derive(Debug, Clone)]
@@ -24,6 +25,27 @@ impl Default for PoolConfig {
         Self {
             max_per_host: 16,
             max_global: 256,
+        }
+    }
+}
+
+/// 从 qf-core 的 ConnectionConfig 转换为连接池配置
+impl From<ConnectionConfig> for PoolConfig {
+    fn from(config: ConnectionConfig) -> Self {
+        Self {
+            max_per_host: config.max_connections_per_host,
+            max_global: config.max_global_connections,
+        }
+    }
+}
+
+/// 从连接池配置转换为 qf-core 的 ConnectionConfig
+impl From<PoolConfig> for ConnectionConfig {
+    fn from(config: PoolConfig) -> Self {
+        Self {
+            max_connections_per_host: config.max_per_host,
+            max_global_connections: config.max_global,
+            ..ConnectionConfig::default()
         }
     }
 }
@@ -260,5 +282,34 @@ mod tests {
             err_msg.contains("信号量") || err_msg.contains("semaphore"),
             "错误信息应包含信号量相关描述,实际: {err_msg}"
         );
+    }
+
+    #[test]
+    fn test_pool_config_from_connection_config() {
+        let conn_cfg = qf_core::config::ConnectionConfig {
+            max_connections_per_host: 8,
+            max_global_connections: 128,
+            keep_alive_timeout_secs: 60,
+            connect_timeout_secs: 5,
+            enable_http2: true,
+            enable_quic: true,
+        };
+        let pool_cfg: PoolConfig = conn_cfg.into();
+        assert_eq!(pool_cfg.max_per_host, 8);
+        assert_eq!(pool_cfg.max_global, 128);
+    }
+
+    #[test]
+    fn test_connection_config_from_pool_config() {
+        let pool_cfg = PoolConfig {
+            max_per_host: 4,
+            max_global: 64,
+        };
+        let conn_cfg: qf_core::config::ConnectionConfig = pool_cfg.into();
+        assert_eq!(conn_cfg.max_connections_per_host, 4);
+        assert_eq!(conn_cfg.max_global_connections, 64);
+        // 未指定的字段应使用默认值
+        assert_eq!(conn_cfg.keep_alive_timeout_secs, 30);
+        assert_eq!(conn_cfg.connect_timeout_secs, 10);
     }
 }

@@ -101,19 +101,26 @@ pub fn dirs() -> Option<std::path::PathBuf> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    pub download_dir: String,
+    /// 最大并发任务数
     pub max_concurrent_tasks: u32,
+    /// 下载配置
     pub download: DownloadConfig,
+    /// 连接配置
     pub connection: ConnectionConfig,
+    /// 调度器配置
     pub scheduler: SchedulerConfig,
+}
+
+impl AppConfig {
+    /// 获取默认下载目录(委托给 DownloadConfig)
+    pub fn download_dir(&self) -> &str {
+        &self.download.download_dir
+    }
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            download_dir: dirs()
-                .map(|p| p.join("Downloads").to_string_lossy().to_string())
-                .unwrap_or_else(|| ".".to_string()),
             max_concurrent_tasks: 5,
             download: DownloadConfig::default(),
             connection: ConnectionConfig::default(),
@@ -147,7 +154,8 @@ mod tests {
     fn test_app_config_default() {
         let config = AppConfig::default();
         assert_eq!(config.max_concurrent_tasks, 5);
-        assert!(config.download_dir.contains("Downloads") || config.download_dir == ".");
+        // download_dir 现在委托给 DownloadConfig
+        assert!(config.download_dir().contains("Downloads") || config.download_dir() == ".");
     }
 
     #[test]
