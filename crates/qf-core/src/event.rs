@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::{DownloadState, TaskId};
 
 /// 下载任务事件
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DownloadEvent {
     /// 任务状态变更
     StateChanged {
@@ -42,7 +42,7 @@ pub enum DownloadEvent {
 }
 
 /// 分片事件
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FragmentEvent {
     /// 分片开始下载
     Started {
@@ -71,7 +71,7 @@ pub enum FragmentEvent {
 }
 
 /// Peer 事件(P2SP)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PeerEvent {
     /// 发现新 Peer
     Discovered { task_id: TaskId, peer_addr: String },

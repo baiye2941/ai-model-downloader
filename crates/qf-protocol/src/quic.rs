@@ -15,6 +15,8 @@
 //! - 全量下载
 
 use bytes::Bytes;
+#[cfg(test)]
+use qf_core::filename::{extract_filename_from_url, parse_content_disposition};
 use qf_core::traits::Protocol;
 use qf_core::types::FileMetadata;
 use qf_core::{QfError, QfResult};
@@ -184,35 +186,6 @@ impl Drop for QuicTransport {
 // 辅助函数:HTTP 响应解析
 // ---------------------------------------------------------------------------
 
-/// 从 URL 中提取文件名
-///
-/// 优先从 URL 路径的最后部分提取,无法提取时返回 "download"。
-fn extract_filename_from_url(url: &str) -> String {
-    Url::parse(url)
-        .ok()
-        .and_then(|u| {
-            u.path()
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| "download".to_string())
-}
-
-/// 解析 Content-Disposition 头中的文件名
-fn parse_content_disposition(value: &str) -> Option<String> {
-    if let Some(pos) = value.find("filename=") {
-        let rest = &value[pos + 9..];
-        let name = rest.trim_matches(|c| c == '"' || c == '\'');
-        let name = name.split(';').next().unwrap_or(name).trim();
-        if !name.is_empty() {
-            return Some(name.to_string());
-        }
-    }
-    None
-}
-
 /// 解析 HTTP HEAD 响应,提取文件元数据
 ///
 /// 响应格式:
@@ -276,14 +249,14 @@ fn parse_head_response(response: &str, url: &str) -> QfResult<FileMetadata> {
                     last_modified = Some(value_trimmed.to_string());
                 }
                 "content-disposition" => {
-                    content_disposition_name = parse_content_disposition(value_trimmed);
+                    content_disposition_name = qf_core::filename::parse_content_disposition(value_trimmed);
                 }
                 _ => {}
             }
         }
     }
 
-    let file_name = content_disposition_name.unwrap_or_else(|| extract_filename_from_url(url));
+    let file_name = content_disposition_name.unwrap_or_else(|| qf_core::filename::extract_filename_from_url(url));
 
     Ok(FileMetadata {
         file_name,
@@ -500,6 +473,11 @@ impl Protocol for QuicTransport {
         let request = build_range_request(url, start, end)?;
         let response_bytes = send_request(conn, &request).await?;
         parse_body_response(&response_bytes)
+    }
+
+    /// 流式下载:当前实现与 download_range 相同,后续将改为流式读取
+    async fn download_range_stream(&self, url: &str, start: u64, end: u64) -> QfResult<Bytes> {
+        self.download_range(url, start, end).await
     }
 
     /// 通过 QUIC 连接发送普通 GET 请求下载完整文件
@@ -830,14 +808,13 @@ mod tests {
     fn test_extract_filename_from_url_root() {
         assert_eq!(
             extract_filename_from_url("https://example.com/"),
-            "download"
+            "unknown"
         );
     }
 
     #[test]
     fn test_extract_filename_from_url_no_path() {
-        // URL 无路径段时应返回 "download"
-        assert_eq!(extract_filename_from_url("https://example.com"), "download");
+        assert_eq!(extract_filename_from_url("https://example.com"), "unknown");
     }
 
     #[test]

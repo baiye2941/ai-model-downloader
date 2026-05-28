@@ -62,7 +62,7 @@ impl GpuVerifier {
                 None,
             )
             .await
-            .map_err(|e| QfError::Other(format!("GPU 设备初始化失败: {e}")))?;
+            .map_err(|e| QfError::Other(format!("GPU 设备初始化失败: {e}").into()))?;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blake3_shader"),

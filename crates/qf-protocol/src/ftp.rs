@@ -418,6 +418,11 @@ impl Protocol for FtpClient {
         result
     }
 
+    /// 流式下载:当前实现与 download_range 相同,后续将改为流式读取
+    async fn download_range_stream(&self, url: &str, start: u64, end: u64) -> QfResult<Bytes> {
+        self.download_range(url, start, end).await
+    }
+
     /// 下载整个 FTP 文件
     ///
     /// 完整流程: 解析 URL -> 连接 -> 登录 -> 设置 Binary 模式 -> RETR -> 断开。

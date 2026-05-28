@@ -21,6 +21,17 @@ pub trait Protocol: Send + Sync {
         end: u64,
     ) -> impl std::future::Future<Output = QfResult<Bytes>> + Send;
 
+    /// 流式下载指定字节范围的数据
+    ///
+    /// 与 `download_range` 不同,此方法以流式方式返回数据块,
+    /// 允许调用方边接收边写入存储,降低峰值内存占用。
+    fn download_range_stream(
+        &self,
+        url: &str,
+        start: u64,
+        end: u64,
+    ) -> impl std::future::Future<Output = QfResult<Bytes>> + Send;
+
     /// 下载整个文件(不支持 Range 时使用)
     fn download_full(&self, url: &str)
     -> impl std::future::Future<Output = QfResult<Bytes>> + Send;
@@ -58,9 +69,16 @@ pub trait Verifier: Send + Sync {
     fn compute_hash(&self, data: &[u8]) -> QfResult<String>;
 
     /// 校验数据是否匹配预期哈希
-    fn verify(&self, data: &[u8], expected_hash: &str) -> QfResult<bool> {
+    fn verify(&self, data: &[u8], expected_hash: &str) -> QfResult<()> {
         let actual = self.compute_hash(data)?;
-        Ok(actual == expected_hash)
+        if actual == expected_hash {
+            Ok(())
+        } else {
+            Err(crate::error::QfError::ChecksumMismatch {
+                expected: expected_hash.to_string(),
+                actual,
+            })
+        }
     }
 }
 

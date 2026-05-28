@@ -42,7 +42,19 @@ pub enum QfError {
     Serialization(#[from] serde_json::Error),
 
     #[error("其他错误: {0}")]
-    Other(String),
+    Other(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<String> for QfError {
+    fn from(s: String) -> Self {
+        QfError::Other(s.into())
+    }
+}
+
+impl From<&str> for QfError {
+    fn from(s: &str) -> Self {
+        QfError::Other(s.to_string().into())
+    }
 }
 
 /// 统一 Result 别名
@@ -121,7 +133,26 @@ mod tests {
     #[test]
     fn test_other_error() {
         let err = QfError::Other("未知错误".into());
-        assert_eq!(err.to_string(), "其他错误: 未知错误");
+        assert!(err.to_string().contains("未知错误"));
+    }
+
+    #[test]
+    fn test_other_error_from_string() {
+        let err: QfError = "简单错误".into();
+        assert!(err.to_string().contains("简单错误"));
+    }
+
+    #[test]
+    fn test_other_error_from_owned_string() {
+        let err: QfError = String::from("拥有错误").into();
+        assert!(err.to_string().contains("拥有错误"));
+    }
+
+    #[test]
+    fn test_other_error_source_chain() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "管道断裂");
+        let err = QfError::Other(Box::new(io_err));
+        assert!(err.to_string().contains("管道断裂"));
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use qf_core::filename::extract_filename_from_url;
 use serde::{Deserialize, Serialize};
 
 use crate::capture::{CaptureConfig, identify_resource, should_capture};
@@ -151,53 +152,6 @@ impl Default for ResourceManager {
     }
 }
 
-/// 从 URL 提取文件名
-fn extract_filename_from_url(url: &str) -> String {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|u| {
-            u.path()
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .map(urlencoding_decode)
-        })
-        .unwrap_or_else(|| "download".to_string())
-}
-
-/// URL 百分号解码(支持多字节 UTF-8 序列)
-///
-/// 对 `%XX` 编码的原始字节进行解码,然后尝试将结果解释为 UTF-8 字符串。
-/// 这正确处理了多字节 UTF-8 序列(如中文 `%E4%B8%AD`)。
-fn urlencoding_decode(s: &str) -> String {
-    let bytes: Vec<u8> = s.bytes().collect();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
-        {
-            decoded.push(hi * 16 + lo);
-            i += 3;
-            continue;
-        }
-        decoded.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(decoded)
-        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
 /// 生成资源唯一 ID
 fn generate_id(url: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
@@ -300,25 +254,5 @@ mod tests {
         rm.on_request("http://example.com/b.mp3", None, Some(10240), None);
         rm.clear();
         assert_eq!(rm.count(), 0);
-    }
-
-    #[test]
-    fn test_extract_filename() {
-        assert_eq!(
-            extract_filename_from_url("http://example.com/path/file.zip"),
-            "file.zip"
-        );
-        assert_eq!(
-            extract_filename_from_url("http://example.com/path/file%20name.zip"),
-            "file name.zip"
-        );
-        assert_eq!(extract_filename_from_url("http://example.com/"), "download");
-    }
-
-    #[test]
-    fn test_urlencoding_decode() {
-        assert_eq!(urlencoding_decode("hello%20world"), "hello world");
-        assert_eq!(urlencoding_decode("file%2Bname"), "file+name");
-        assert_eq!(urlencoding_decode("normal"), "normal");
     }
 }

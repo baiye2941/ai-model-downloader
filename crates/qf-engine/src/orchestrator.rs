@@ -12,7 +12,7 @@ use qf_core::config::SchedulerConfig;
 use qf_core::types::FragmentInfo;
 
 use crate::connection::{ConnectionPool, PoolConfig};
-use crate::fragment::{BandwidthTracker, compute_fragment_size};
+use crate::fragment::{BandwidthTracker, FragmentRecord, compute_fragment_size};
 
 /// 下载编排器,统一管理分片策略、连接池与带宽追踪
 pub struct DownloadOrchestrator {
@@ -23,17 +23,7 @@ pub struct DownloadOrchestrator {
     /// 调度器配置(分片大小约束)
     scheduler_config: SchedulerConfig,
     /// 活跃分片记录
-    #[allow(dead_code)]
     active_fragments: Vec<FragmentRecord>,
-}
-
-/// 编排器内部的分片跟踪记录
-#[allow(dead_code)]
-pub struct FragmentRecord {
-    /// 分片信息
-    pub info: FragmentInfo,
-    /// 是否已完成
-    pub completed: bool,
 }
 
 impl DownloadOrchestrator {
@@ -147,10 +137,7 @@ impl DownloadOrchestrator {
 
     /// 注册分片到活跃列表(供上层追踪分片状态)
     pub fn register_fragment(&mut self, info: FragmentInfo) {
-        self.active_fragments.push(FragmentRecord {
-            info,
-            completed: false,
-        });
+        self.active_fragments.push(FragmentRecord::new(info, 3));
     }
 
     /// 标记分片完成并更新带宽追踪(供上层在分片下载完成后调用)
@@ -161,7 +148,7 @@ impl DownloadOrchestrator {
             .iter_mut()
             .find(|r| r.info.index == info.index)
         {
-            record.completed = true;
+            record.write_done();
         }
     }
 
@@ -352,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn test_active_connections_with_permits() {
         let orch = make_orchestrator();
-        let _permit = orch.pool().acquire("example.com").await;
+        let _permit = orch.pool().acquire("example.com").await.unwrap();
         assert_eq!(orch.active_connections(), 1);
     }
 

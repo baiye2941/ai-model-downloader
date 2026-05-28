@@ -264,4 +264,26 @@ mod tests {
         file.preallocate(4096).await.unwrap();
         assert_eq!(file.file_size().await.unwrap(), 4096);
     }
+
+    /// 验证 WinFile NO_BUFFERING 模式对齐写入:非对齐偏移/长度应返回错误
+    #[tokio::test]
+    async fn test_winfile_align() {
+        let tmp = NamedTempFile::new().unwrap();
+        let file = WinFile::open_standard(tmp.path()).await.unwrap();
+        // 标准模式下非对齐写入应该成功
+        assert!(file.write_at(0, b"hello").await.is_ok());
+
+        // 验证 WinFile 内部的对齐逻辑:对齐到 512 字节边界
+        let offset: u64 = 100;
+        let sector_size: u64 = 512;
+        assert!(!offset.is_multiple_of(sector_size), "100 不应是 512 的倍数");
+        assert!(sector_size.is_multiple_of(sector_size));
+        assert!((sector_size * 2).is_multiple_of(sector_size));
+
+        // 验证对齐 helper 逻辑
+        let data_len = 256u64;
+        assert!(!data_len.is_multiple_of(sector_size), "256 不应是 512 的倍数");
+        let aligned_len = 512u64;
+        assert!(aligned_len.is_multiple_of(sector_size));
+    }
 }

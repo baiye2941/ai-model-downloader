@@ -3,7 +3,7 @@
 //! 管理下载任务的 Peer 列表,实现多源选择算法。
 
 /// Peer 评分因子
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PeerScore {
     /// 延迟权重(30%)
     pub latency_ms: u32,
@@ -43,7 +43,7 @@ impl Default for PeerScore {
 }
 
 /// Peer 信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PeerInfo {
     /// Peer 地址
     pub addr: String,

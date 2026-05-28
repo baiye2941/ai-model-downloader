@@ -144,15 +144,22 @@ fn align_buffer_size(size: usize, align: usize) -> usize {
     (size + align - 1) & !(align - 1)
 }
 
-/// 分配对齐的 Vec<u8>(O_DIRECT 要求)
+/// 分配对齐的 Vec<u8>(O_DIRECT/io_uring 要求)
 ///
-/// 使用 `vec!` 宏一次性分配并归零,避免 `with_capacity` + `resize` 的 clippy 警告。
-/// Vec 的起始地址不保证对齐,但 buffer 长度保证为 align 的整数倍,
-/// 以便后续通过 io_uring register_buffers 由内核验证地址对齐。
+/// 使用 Layout 保证内存地址按 align 字节对齐,满足内核对 fixed buffer 的对齐要求。
+/// 返回的 Vec 长度保证为 align 的整数倍。
 #[cfg(target_os = "linux")]
-fn aligned_alloc(size: usize, _align: usize) -> Vec<u8> {
-    // 使用 vec! 宏一次性分配并归零,避免 clippy::slow_vector_initialization
-    vec![0u8; size]
+fn aligned_alloc(size: usize, align: usize) -> Vec<u8> {
+    let aligned_size = align_buffer_size(size, align);
+    let layout = std::alloc::Layout::from_size_align(aligned_size, align)
+        .expect("无效的对齐分配布局");
+    // Safety: layout 非零且有效,由 Layout::from_size_align 保证
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    if ptr.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    // Safety: ptr 由 alloc_zeroed 分配,大小为 aligned_size,全部初始化为零
+    unsafe { Vec::from_raw_parts(ptr, aligned_size, aligned_size) }
 }
 
 impl IoUringStorage {
@@ -417,9 +424,8 @@ impl AsyncStorage for IoUringStorage {
     }
 }
 
-// 确保 IoUringStorage 可以跨线程使用
-//
-// 安全性论证:
+// Safety:
+// IoUringStorage 可以安全地跨线程使用,基于以下不变量:
 // - IoUringConfig: 所有字段为 Copy 类型(Send+Sync)
 // - PathBuf: Send+Sync
 // - Option<std::fs::File>: Send+Sync
@@ -609,5 +615,63 @@ mod tests {
         assert!(storage.config().sqpoll);
         assert_eq!(storage.config().sqpoll_idle_ms, 500);
         assert_eq!(storage.path(), Path::new("/data/download.bin"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_aligned_alloc_address_alignment() {
+        let buf = aligned_alloc(1024, 512);
+        assert_eq!(buf.len(), 1024);
+        assert!(buf.as_ptr() as usize % 512 == 0, "buffer 地址未按 512 字节对齐");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_aligned_alloc_rounds_up_size() {
+        let buf = aligned_alloc(100, 512);
+        assert_eq!(buf.len(), 512, "100 字节应向上对齐到 512");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_align_buffer_size_rounding() {
+        // 在非 Linux 平台上验证对齐函数的逻辑(通过编译时可用的函数)
+        // align_buffer_size 仅在 Linux 上编译,此处测试概念验证
+        let size: usize = 100;
+        let align: usize = 512;
+        let aligned = (size + align - 1) & !(align - 1);
+        assert_eq!(aligned, 512);
+    }
+
+    /// 验证 io_uring buffer 对齐逻辑:512 和 4096 字节对齐均正确
+    #[test]
+    fn test_buffer_align() {
+        // 512 字节对齐
+        let size_512 = 100usize;
+        let aligned_512 = (size_512 + 511) & !511;
+        assert_eq!(aligned_512, 512);
+        assert!(aligned_512 % 512 == 0);
+
+        // 4096 字节对齐(O_DIRECT 要求)
+        let size_4k = 1000usize;
+        let aligned_4k = (size_4k + 4095) & !4095;
+        assert_eq!(aligned_4k, 4096);
+        assert!(aligned_4k % 4096 == 0);
+
+        // 已对齐的大小不变
+        assert_eq!((4096usize + 4095) & !4095, 4096);
+        assert_eq!((512usize + 511) & !511, 512);
+
+        // 默认 buffer_size 64KB 也应是 4096 的倍数
+        let default_size = 64 * 1024usize;
+        assert_eq!(default_size % 4096, 0, "默认 buffer_size 应为 4096 对齐");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_aligned_alloc_buffer_align() {
+        let buf = aligned_alloc(1024, 4096);
+        assert_eq!(buf.len(), 1024);
+        assert_eq!(buf.as_ptr() as usize % 4096, 0, "buffer 地址应按 4096 对齐");
     }
 }

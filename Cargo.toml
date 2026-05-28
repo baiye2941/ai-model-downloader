@@ -9,6 +9,7 @@ members = [
     "crates/qf-sniffer",
     "crates/qf-crypto",
     "crates/qf-p2sp",
+    "crates/qf-store",
     "crates/qf-app",
 ]
 
@@ -107,6 +108,10 @@ harness = false
 
 [[bench]]
 name = "fragment_planning"
+harness = false
+
+[[bench]]
+name = "hex_encode"
 harness = false
 
 [profile.release]

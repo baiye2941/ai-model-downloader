@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use tokio::sync::Semaphore;
 
+use qf_core::QfError;
+
 /// 连接池配置
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
@@ -29,7 +31,7 @@ impl Default for PoolConfig {
 /// 全局连接池管理器
 pub struct ConnectionPool {
     config: PoolConfig,
-    global_semaphore: Arc<Semaphore>,
+    pub(crate) global_semaphore: Arc<Semaphore>,
     active_count: AtomicU32,
     host_semaphores: tokio::sync::Mutex<HashMap<String, Arc<Semaphore>>>,
 }
@@ -54,24 +56,24 @@ impl ConnectionPool {
     }
 
     /// 获取连接许可(全局 + 主机级别双重限制)
-    pub async fn acquire(&self, host: &str) -> ConnectionPermit<'_> {
+    pub async fn acquire(&self, host: &str) -> Result<ConnectionPermit<'_>, QfError> {
         let global_permit = self
             .global_semaphore
             .clone()
             .acquire_owned()
             .await
-            .unwrap_or_else(|_| panic!("全局连接信号量已关闭"));
+            .map_err(|_| QfError::Network("全局连接信号量已关闭".into()))?;
         let host_sem = self.host_semaphore(host).await;
         let host_permit = host_sem
             .acquire_owned()
             .await
-            .unwrap_or_else(|_| panic!("主机连接信号量已关闭"));
+            .map_err(|_| QfError::Network("主机连接信号量已关闭".into()))?;
         self.active_count.fetch_add(1, Ordering::Relaxed);
-        ConnectionPermit {
+        Ok(ConnectionPermit {
             _global_permit: global_permit,
             _host_permit: host_permit,
             active_count: &self.active_count,
-        }
+        })
     }
 
     /// 当前活跃连接数
@@ -133,7 +135,7 @@ mod tests {
             max_global: 10,
         });
         {
-            let _permit = pool.acquire("example.com").await;
+            let _permit = pool.acquire("example.com").await.unwrap();
             assert_eq!(pool.active_connections(), 1);
         }
         assert_eq!(pool.active_connections(), 0);
@@ -145,8 +147,8 @@ mod tests {
             max_per_host: 2,
             max_global: 10,
         }));
-        let _p1 = pool.acquire("example.com").await;
-        let _p2 = pool.acquire("example.com").await;
+        let _p1 = pool.acquire("example.com").await.unwrap();
+        let _p2 = pool.acquire("example.com").await.unwrap();
         assert_eq!(pool.active_connections(), 2);
     }
 
@@ -156,8 +158,8 @@ mod tests {
             max_per_host: 1,
             max_global: 10,
         });
-        let _p1 = pool.acquire("host1.com").await;
-        let _p2 = pool.acquire("host2.com").await;
+        let _p1 = pool.acquire("host1.com").await.unwrap();
+        let _p2 = pool.acquire("host2.com").await.unwrap();
         assert_eq!(pool.active_connections(), 2);
     }
 
@@ -176,8 +178,8 @@ mod tests {
         });
         // 触发主机条目创建
         {
-            let _p1 = pool.acquire("example.com").await;
-            let _p2 = pool.acquire("other.com").await;
+            let _p1 = pool.acquire("example.com").await.unwrap();
+            let _p2 = pool.acquire("other.com").await.unwrap();
         }
         // 所有连接已释放,主机应为空闲
         assert_eq!(pool.host_count().await, 2);
@@ -191,10 +193,10 @@ mod tests {
             max_per_host: 2,
             max_global: 10,
         });
-        let _active = pool.acquire("busy.com").await;
+        let _active = pool.acquire("busy.com").await.unwrap();
         // 空闲主机
         {
-            let _p = pool.acquire("idle.com").await;
+            let _p = pool.acquire("idle.com").await.unwrap();
         }
         pool.cleanup_idle_hosts().await;
         // busy.com 仍有活跃连接,应保留;idle.com 应被清理
@@ -212,9 +214,51 @@ mod tests {
     async fn test_host_count() {
         let pool = ConnectionPool::new(PoolConfig::default());
         assert_eq!(pool.host_count().await, 0);
-        let _p1 = pool.acquire("a.com").await;
-        let _p2 = pool.acquire("b.com").await;
-        let _p3 = pool.acquire("c.com").await;
+        let _p1 = pool.acquire("a.com").await.unwrap();
+        let _p2 = pool.acquire("b.com").await.unwrap();
+        let _p3 = pool.acquire("c.com").await.unwrap();
         assert_eq!(pool.host_count().await, 3);
+    }
+
+    /// 验证信号量关闭时返回错误而非 panic
+    #[tokio::test]
+    async fn test_semaphore() {
+        let pool = ConnectionPool::new(PoolConfig {
+            max_per_host: 1,
+            max_global: 1,
+        });
+        pool.global_semaphore.close();
+        let result = pool.acquire("test.com").await;
+        assert!(result.is_err(), "关闭的信号量应返回错误而非 panic");
+        let err = match result {
+            Ok(_) => panic!("期望错误"),
+            Err(e) => e,
+        };
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("信号量") || err_msg.contains("semaphore"),
+            "错误信息应包含信号量描述: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_semaphore_closed_returns_error() {
+        let pool = ConnectionPool::new(PoolConfig {
+            max_per_host: 1,
+            max_global: 1,
+        });
+        // 关闭全局信号量
+        pool.global_semaphore.close();
+        let result = pool.acquire("test.com").await;
+        assert!(result.is_err(), "关闭的信号量应返回错误而非 panic");
+        let err = match result {
+            Ok(_) => panic!("期望错误"),
+            Err(e) => e,
+        };
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("信号量") || err_msg.contains("semaphore"),
+            "错误信息应包含信号量相关描述,实际: {err_msg}"
+        );
     }
 }

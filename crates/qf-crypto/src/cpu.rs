@@ -6,7 +6,7 @@ use qf_core::error::QfResult;
 use qf_core::traits::Verifier;
 
 /// 哈希算法类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HashAlgorithm {
     /// Blake3 哈希(推荐,速度极快)
     Blake3,
@@ -67,7 +67,13 @@ impl Verifier for CpuVerifier {
 
 /// 十六进制编码
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    let mut s = String::with_capacity(bytes.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
 }
 
 /// 根据数据大小自动选择最优校验算法
@@ -135,14 +141,19 @@ mod tests {
         let verifier = CpuVerifier::blake3();
         let data = b"verify me";
         let hash = verifier.compute_hash(data).unwrap();
-        assert!(verifier.verify(data, &hash).unwrap());
+        verifier.verify(data, &hash).unwrap();
     }
 
     #[test]
     fn test_verify_mismatch() {
         let verifier = CpuVerifier::blake3();
         let hash = verifier.compute_hash(b"original").unwrap();
-        assert!(!verifier.verify(b"tampered", &hash).unwrap());
+        let result = verifier.verify(b"tampered", &hash);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            qf_core::QfError::ChecksumMismatch { .. }
+        ));
     }
 
     #[test]

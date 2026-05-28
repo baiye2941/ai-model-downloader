@@ -72,6 +72,10 @@ pub mod harness {
                 .ok_or_else(|| QfError::Network(format!("未找到范围数据: {start}-{end}")))
         }
 
+        async fn download_range_stream(&self, url: &str, start: u64, end: u64) -> QfResult<Bytes> {
+            self.download_range(url, start, end).await
+        }
+
         async fn download_full(&self, _url: &str) -> QfResult<Bytes> {
             self.default_data
                 .clone()

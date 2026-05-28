@@ -197,7 +197,7 @@ mod tests {
             },
             PeerScore {
                 latency_ms: 200,
-                bandwidth_bps: 1 * 1024 * 1024,
+                bandwidth_bps: 1024 * 1024,
                 stability: 0.5,
                 distance: 100,
             },
@@ -256,10 +256,10 @@ mod tests {
         let mut cdn_count = 0;
         let iterations = 1000;
         for _ in 0..iterations {
-            if let Some(src) = selector.select_source() {
-                if matches!(src, DownloadSource::Cdn { .. }) {
-                    cdn_count += 1;
-                }
+            if let Some(src) = selector.select_source()
+                && matches!(src, DownloadSource::Cdn { .. })
+            {
+                cdn_count += 1;
             }
         }
         // CDN 评分显著高于 Peer,被选中比例应超过 50%
@@ -333,10 +333,10 @@ mod tests {
         let mut peer_count = 0;
         let iterations = 1000;
         for _ in 0..iterations {
-            if let Some(src) = selector.select_source() {
-                if matches!(src, DownloadSource::Peer { .. }) {
-                    peer_count += 1;
-                }
+            if let Some(src) = selector.select_source()
+                && matches!(src, DownloadSource::Peer { .. })
+            {
+                peer_count += 1;
             }
         }
         assert!(

@@ -10,7 +10,7 @@ use bytes::Bytes;
 use qf_core::types::FragmentInfo;
 
 /// 分片状态
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FragmentState {
     /// 等待下载
     Pending,

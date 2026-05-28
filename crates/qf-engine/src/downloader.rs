@@ -204,28 +204,20 @@ impl StorageKind {
 /// 校验器类型枚举
 ///
 /// 封装不同的哈希校验实现。后续可扩展 GPU 校验等变体。
+#[derive(Clone)]
 pub enum VerifierKind {
     /// CPU 校验器(blake3/sha256)
     Cpu(CpuVerifier),
 }
 
-// CpuVerifier 是无状态的,clone 时保留原始算法
-impl Clone for VerifierKind {
-    fn clone(&self) -> Self {
-        match self {
-            VerifierKind::Cpu(v) => VerifierKind::Cpu(v.clone()),
-        }
-    }
-}
-
 impl VerifierKind {
     /// 创建默认 CPU 校验器(blake3)
-    fn blake3() -> Self {
+    pub(crate) fn blake3() -> Self {
         VerifierKind::Cpu(CpuVerifier::blake3())
     }
 
     /// 校验数据是否匹配预期哈希
-    fn verify(&self, data: &[u8], expected: &str) -> QfResult<bool> {
+    pub(crate) fn verify(&self, data: &[u8], expected: &str) -> QfResult<()> {
         match self {
             VerifierKind::Cpu(v) => v.verify(data, expected),
         }
@@ -328,7 +320,8 @@ impl DownloadTask {
             "探测完成"
         );
         self.metadata = Some(metadata);
-        Ok(self.metadata.as_ref().expect("元数据已填充"))
+        self.metadata.as_ref()
+            .ok_or_else(|| QfError::Config("探测完成但元数据未填充".into()))
     }
 
     // ----- 步骤 2: 规划分片 -----
@@ -441,7 +434,7 @@ impl DownloadTask {
                 .clone()
                 .acquire_owned()
                 .await
-                .map_err(|e| QfError::Other(format!("信号量获取失败: {e}")))?;
+                .map_err(|e| QfError::Other(format!("信号量获取失败: {e}").into()))?;
 
             let frag_url = url.clone();
             let frag_storage = storage.clone();
@@ -477,7 +470,7 @@ impl DownloadTask {
         for handle in handles {
             let result = handle
                 .await
-                .map_err(|e| QfError::Other(format!("分片任务 panic: {e}")))?;
+                .map_err(|e| QfError::Other(format!("分片任务 panic: {e}").into()))?;
 
             let (index, downloaded) = result?;
 
@@ -499,10 +492,10 @@ impl DownloadTask {
     ///
     /// 遍历所有带哈希值的分片,从存储中读取数据并与预期哈希比对。
     /// 任一分片校验失败即返回 `false`。
-    pub async fn verify(&mut self) -> QfResult<bool> {
+    pub async fn verify(&mut self) -> QfResult<()> {
         if !self.config.verify_checksum {
             debug!("校验已禁用,跳过");
-            return Ok(true);
+            return Ok(());
         }
 
         self.state = DownloadState::Verifying;
@@ -514,22 +507,27 @@ impl DownloadTask {
                 let read = self.storage.read_at(frag.info.start, &mut buf).await?;
                 buf.truncate(read);
 
-                if !self.verifier.verify(&buf, expected_hash)? {
-                    warn!(
-                        index = frag.info.index,
-                        expected = %expected_hash,
-                        "分片校验失败"
-                    );
-                    self.state = DownloadState::Failed;
-                    return Ok(false);
+                match self.verifier.verify(&buf, expected_hash) {
+                    Ok(()) => {
+                        debug!(index = frag.info.index, "分片校验通过");
+                    }
+                    Err(QfError::ChecksumMismatch { expected, actual }) => {
+                        warn!(
+                            index = frag.info.index,
+                            expected = %expected,
+                            actual = %actual,
+                            "分片校验失败"
+                        );
+                        self.state = DownloadState::Failed;
+                        return Err(QfError::ChecksumMismatch { expected, actual });
+                    }
+                    Err(e) => return Err(e),
                 }
-
-                debug!(index = frag.info.index, "分片校验通过");
             }
         }
 
         info!("文件完整性校验通过");
-        Ok(true)
+        Ok(())
     }
 
     // ----- 一键运行 -----
@@ -566,13 +564,7 @@ impl DownloadTask {
         self.execute().await?;
 
         // 步骤 5: 校验
-        let verified = self.verify().await?;
-        if !verified {
-            return Err(QfError::ChecksumMismatch {
-                expected: "文件哈希".into(),
-                actual: "校验失败".into(),
-            });
-        }
+        self.verify().await?;
 
         self.state = DownloadState::Completed;
         info!("下载任务完成");
@@ -1015,8 +1007,7 @@ mod tests {
         task.fragments = vec![FragmentRecord::new(frag_info, 3)];
         task.metadata = Some(test_metadata("v.bin", data.len() as u64));
 
-        let verified = task.verify().await.unwrap();
-        assert!(verified, "带正确哈希的分片应通过校验");
+        task.verify().await.unwrap();
     }
 
     #[tokio::test]
@@ -1050,8 +1041,9 @@ mod tests {
         task.fragments = vec![FragmentRecord::new(frag_info, 3)];
         task.metadata = Some(test_metadata("c.bin", data.len() as u64));
 
-        let verified = task.verify().await.unwrap();
-        assert!(!verified, "哈希不匹配时校验应失败");
+        let result = task.verify().await;
+        assert!(result.is_err(), "哈希不匹配时校验应失败");
+        assert!(matches!(result.unwrap_err(), QfError::ChecksumMismatch { .. }));
         assert_eq!(task.state(), DownloadState::Failed);
     }
 
@@ -1068,8 +1060,7 @@ mod tests {
             },
         );
 
-        let verified = task.verify().await.unwrap();
-        assert!(verified, "校验禁用时应返回 true");
+        task.verify().await.unwrap();
     }
 
     // ------ 10. 空文件处理 -----
@@ -1155,6 +1146,20 @@ mod tests {
             3,
         )];
         assert!((task.progress() - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ------ 补充: VerifierKind clone 验证 -----
+
+    #[test]
+    fn test_verifier_kind_clone() {
+        let v = VerifierKind::blake3();
+        let v2 = v.clone();
+        // 验证 clone 后校验行为一致
+        let data = b"test data for clone verification";
+        let hash = match &v {
+            VerifierKind::Cpu(cv) => cv.compute_hash(data).unwrap(),
+        };
+        assert!(v2.verify(data, &hash).is_ok());
     }
 
     // ------ 补充: URL 解析校验 -----

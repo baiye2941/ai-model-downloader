@@ -74,10 +74,7 @@ async fn integration_fragment_write_and_verify() {
     assert_eq!(hash.len(), 64, "blake3 哈希长度应为 64 字符");
 
     // 校验通过
-    assert!(
-        verifier.verify(&buf, &hash).expect("校验失败"),
-        "数据校验应通过"
-    );
+    verifier.verify(&buf, &hash).expect("校验失败");
 }
 
 /// 测试使用 MemoryStorage 的跨 crate 协同
@@ -120,11 +117,7 @@ async fn integration_memory_storage_full_flow() {
     // 校验每个分片的哈希
     for (i, frag) in fragments.iter().enumerate() {
         let chunk = &expected_data[frag.start as usize..frag.start as usize + frag.size as usize];
-        assert!(
-            verifier.verify(chunk, &fragment_hashes[i]).unwrap(),
-            "分片 {} 校验失败",
-            frag.index
-        );
+        verifier.verify(chunk, &fragment_hashes[i]).unwrap();
     }
 }
 
@@ -145,12 +138,12 @@ async fn integration_tamper_detection() {
     // 读回数据,校验通过
     let mut buf = vec![0u8; original_data.len()];
     storage.read_at(0, &mut buf).await.unwrap();
-    assert!(verifier.verify(&buf, &original_hash).unwrap());
+    assert!(verifier.verify(&buf, &original_hash).is_ok());
 
     // 篡改数据
     buf[0] = buf[0].wrapping_add(1);
     assert!(
-        !verifier.verify(&buf, &original_hash).unwrap(),
+        verifier.verify(&buf, &original_hash).is_err(),
         "篡改数据后校验应失败"
     );
 }
@@ -220,12 +213,12 @@ async fn integration_pipeline_write_and_crypto_verify() {
 
     // 计算并校验哈希
     let hash = verifier.compute_hash(&buf).unwrap();
-    assert!(verifier.verify(&buf, &hash).unwrap());
+    verifier.verify(&buf, &hash).unwrap();
 
     // 篡改其中一个字节后校验应失败
     let mut tampered = buf.clone();
     tampered[10] ^= 0xFF;
-    assert!(!verifier.verify(&tampered, &hash).unwrap());
+    assert!(verifier.verify(&tampered, &hash).is_err());
 }
 
 // ============================================================
@@ -263,8 +256,7 @@ async fn integration_fragment_lifecycle_with_verification() {
 
     // 校验数据
     let hash = verifier.compute_hash(&data).unwrap();
-    let is_valid = verifier.verify(&data, &hash).unwrap();
-    assert!(is_valid);
+    verifier.verify(&data, &hash).unwrap();
 
     // 记录哈希
     record.info.hash = Some(hash.clone());
@@ -285,7 +277,7 @@ async fn integration_fragment_lifecycle_with_verification() {
     // 最终验证: 存储数据与分片哈希一致
     let stored = storage.get_data();
     assert_eq!(stored.len(), 1000);
-    assert!(verifier.verify(&stored, &hash).unwrap());
+    assert!(verifier.verify(&stored, &hash).is_ok());
 }
 
 /// 测试多分片并发写入 + 校验
@@ -317,7 +309,7 @@ async fn integration_multi_fragment_concurrent() {
         let mut read_buf = vec![0u8; frag.size as usize];
         storage.read_at(frag.start, &mut read_buf).await.unwrap();
         assert!(
-            verifier.verify(&read_buf, &hash).unwrap(),
+            verifier.verify(&read_buf, &hash).is_ok(),
             "分片 {} 校验失败",
             frag.index
         );
@@ -352,7 +344,7 @@ async fn integration_fragment_retry_and_verify() {
 
     // 校验
     let hash = verifier.compute_hash(&data).unwrap();
-    assert!(verifier.verify(&data, &hash).unwrap());
+    assert!(verifier.verify(&data, &hash).is_ok());
     record.verify_ok();
     record.write_done();
     assert!(record.is_done());
@@ -527,7 +519,7 @@ async fn integration_downloader_full_pipeline() {
     assert!(all_data.iter().all(|&b| b == 0xAB));
 
     let hash = verifier.compute_hash(&all_data).unwrap();
-    assert!(verifier.verify(&all_data, &hash).unwrap());
+    assert!(verifier.verify(&all_data, &hash).is_ok());
 }
 
 /// 嗅探资源管理器完整流程:拦截->识别->去重->过滤->清理

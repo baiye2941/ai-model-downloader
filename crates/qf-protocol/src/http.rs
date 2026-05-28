@@ -6,6 +6,7 @@
 //! - Keep-Alive 连接复用
 
 use bytes::Bytes;
+use qf_core::filename::extract_filename;
 use qf_core::traits::Protocol;
 use qf_core::types::FileMetadata;
 use qf_core::{QfError, QfResult};
@@ -56,7 +57,8 @@ impl Protocol for HttpClient {
         }
 
         let headers = response.headers();
-        let file_name = extract_filename(url, headers);
+        let content_disposition = headers.get("content-disposition").and_then(|v| v.to_str().ok());
+        let file_name = extract_filename(url, content_disposition);
         let file_size = headers
             .get("content-length")
             .and_then(|v| v.to_str().ok())
@@ -115,6 +117,11 @@ impl Protocol for HttpClient {
             .map_err(|e| QfError::Network(format!("读取响应体失败: {e}")))
     }
 
+    /// 流式下载:当前实现与 download_range 相同,后续将改为流式读取
+    async fn download_range_stream(&self, url: &str, start: u64, end: u64) -> QfResult<Bytes> {
+        self.download_range(url, start, end).await
+    }
+
     async fn download_full(&self, url: &str) -> QfResult<Bytes> {
         let response = self
             .client
@@ -135,61 +142,24 @@ impl Protocol for HttpClient {
     }
 }
 
-/// 从 URL 和 headers 提取文件名
-fn extract_filename(url: &str, headers: &reqwest::header::HeaderMap) -> String {
-    // 优先从 Content-Disposition 提取
-    if let Some(cd) = headers.get("content-disposition")
-        && let Ok(cd_str) = cd.to_str()
-        && let Some(name) = parse_content_disposition(cd_str)
-    {
-        return name;
-    }
-    // 从 URL 路径提取
-    url::Url::parse(url)
-        .ok()
-        .and_then(|u| {
-            u.path()
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| "download".to_string())
-}
-
-/// 解析 Content-Disposition 头中的文件名
-fn parse_content_disposition(value: &str) -> Option<String> {
-    // filename="name"
-    if let Some(pos) = value.find("filename=") {
-        let rest = &value[pos + 9..];
-        let name = rest.trim_matches(|c| c == '"' || c == '\'');
-        let name = name.split(';').next().unwrap_or(name).trim();
-        if !name.is_empty() {
-            return Some(name.to_string());
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qf_core::filename::parse_content_disposition;
 
     #[test]
     fn test_extract_filename_from_url() {
-        let headers = reqwest::header::HeaderMap::new();
         assert_eq!(
-            extract_filename("http://example.com/path/file.zip", &headers),
+            extract_filename("http://example.com/path/file.zip", None),
             "file.zip"
         );
     }
 
     #[test]
     fn test_extract_filename_from_url_root() {
-        let headers = reqwest::header::HeaderMap::new();
         assert_eq!(
-            extract_filename("http://example.com/", &headers),
-            "download"
+            extract_filename("http://example.com/", None),
+            "unknown"
         );
     }
 
