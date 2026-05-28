@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const USER_AGENT: &str = "QuantumFetch/0.1.0";
+
 /// 下载配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadConfig {
@@ -31,7 +33,7 @@ impl Default for DownloadConfig {
             max_retries: 3,
             request_timeout_secs: 30,
             verify_checksum: true,
-            user_agent: format!("QuantumFetch/{}", env!("CARGO_PKG_VERSION")),
+            user_agent: USER_AGENT.to_string(),
             headers: std::collections::HashMap::new(),
         }
     }
@@ -91,10 +93,33 @@ impl Default for SchedulerConfig {
     }
 }
 
-fn dirs() -> Option<std::path::PathBuf> {
+pub fn dirs() -> Option<std::path::PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(std::path::PathBuf::from)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub download_dir: String,
+    pub max_concurrent_tasks: u32,
+    pub download: DownloadConfig,
+    pub connection: ConnectionConfig,
+    pub scheduler: SchedulerConfig,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            download_dir: dirs()
+                .map(|p| p.join("Downloads").to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string()),
+            max_concurrent_tasks: 5,
+            download: DownloadConfig::default(),
+            connection: ConnectionConfig::default(),
+            scheduler: SchedulerConfig::default(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -110,6 +135,19 @@ mod tests {
         assert!(config.verify_checksum);
         assert!(config.user_agent.starts_with("QuantumFetch/"));
         assert!(config.headers.is_empty());
+    }
+
+    #[test]
+    fn test_user_agent_constant() {
+        assert_eq!(USER_AGENT, "QuantumFetch/0.1.0");
+        assert_eq!(DownloadConfig::default().user_agent, USER_AGENT);
+    }
+
+    #[test]
+    fn test_app_config_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.max_concurrent_tasks, 5);
+        assert!(config.download_dir.contains("Downloads") || config.download_dir == ".");
     }
 
     #[test]

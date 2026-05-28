@@ -17,7 +17,9 @@ pub mod types;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // 重新导出核心类型
+pub use config::AppConfig;
 pub use config::SchedulerConfig;
+pub use config::USER_AGENT;
 pub use error::{QfError, QfResult};
 pub use filename::{extract_filename, extract_filename_from_url, parse_content_disposition};
 pub use traits::{Protocol, Storage, Verifier};
