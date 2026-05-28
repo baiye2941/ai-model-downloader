@@ -105,24 +105,30 @@ async fn download_range_stream() {
     }
 
     impl Protocol for LocalMock {
-        async fn probe(&self, _url: &str) -> QfResult<FileMetadata> {
-            Ok(FileMetadata {
-                file_name: "test.bin".into(),
-                file_size: Some(self.data.len() as u64),
-                content_type: None,
-                supports_range: true,
-                etag: None,
-                last_modified: None,
+        fn probe(&self, _url: &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
+            let file_size = self.data.len() as u64;
+            Box::pin(async move {
+                Ok(FileMetadata {
+                    file_name: "test.bin".into(),
+                    file_size: Some(file_size),
+                    content_type: None,
+                    supports_range: true,
+                    etag: None,
+                    last_modified: None,
+                })
             })
         }
-        async fn download_range(&self, _url: &str, _start: u64, _end: u64) -> QfResult<Bytes> {
-            Ok(self.data.clone())
+        fn download_range(&self, _url: &str, _start: u64, _end: u64) -> std::pin::Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+            let data = self.data.clone();
+            Box::pin(async move { Ok(data) })
         }
-        async fn download_range_stream(&self, _url: &str, _start: u64, _end: u64) -> QfResult<Bytes> {
-            Ok(self.data.clone())
+        fn download_range_stream(&self, _url: &str, _start: u64, _end: u64) -> std::pin::Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+            let data = self.data.clone();
+            Box::pin(async move { Ok(data) })
         }
-        async fn download_full(&self, _url: &str) -> QfResult<Bytes> {
-            Ok(self.data.clone())
+        fn download_full(&self, _url: &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+            let data = self.data.clone();
+            Box::pin(async move { Ok(data) })
         }
     }
 

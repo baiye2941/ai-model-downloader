@@ -11,6 +11,9 @@
 //! 均建立独立连接,操作完成后自动断开,适合无状态调用场景。
 //! `connect`/`login`/`retrieve` 等实例方法维护持久连接状态。
 
+use std::pin::Pin;
+use std::sync::Arc;
+
 use bytes::Bytes;
 use qf_core::traits::Protocol;
 use qf_core::types::FileMetadata;
@@ -52,11 +55,13 @@ struct ConnectionState {
 
 /// FTP 协议客户端
 ///
-/// 内部使用 `tokio::sync::Mutex` 保护连接状态,使 `Protocol` trait 的 `&self`
+/// 内部使用 `Arc<Mutex>` 保护连接状态,使 `Protocol` trait 的 `&self`
 /// 方法可安全地执行需要 `&mut FtpStream` 的 FTP 操作。
+/// `Clone` 实现共享同一底层连接状态。
+#[derive(Clone)]
 pub struct FtpClient {
-    /// 持久连接状态(通过 Mutex 实现内部可变性)
-    inner: Mutex<ConnectionState>,
+    /// 持久连接状态(通过 Arc<Mutex> 实现内部可变性与共享)
+    inner: Arc<Mutex<ConnectionState>>,
 }
 
 impl FtpClient {
@@ -65,13 +70,13 @@ impl FtpClient {
     /// 初始状态为 `Disconnected`,不建立任何网络连接。
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(ConnectionState {
+            inner: Arc::new(Mutex::new(ConnectionState {
                 state: FtpState::Disconnected,
                 stream: None,
                 host: String::new(),
                 port: 0,
                 username: None,
-            }),
+            })),
         }
     }
 
@@ -361,86 +366,85 @@ struct FtpUrl {
 }
 
 impl Protocol for FtpClient {
-    /// 探测 FTP 文件元数据
-    ///
-    /// 完整流程: 解析 URL -> 连接 -> 登录 -> SIZE -> 构造 FileMetadata -> 断开。
-    /// 使用 URL 中的用户名/密码,未指定时以 anonymous 身份登录。
-    async fn probe(&self, url: &str) -> QfResult<FileMetadata> {
-        let info = Self::parse_ftp_url(url)?;
+    fn probe(&self, url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
+        let url = url.to_owned();
+        let this = self.clone();
+        Box::pin(async move {
+            let info = Self::parse_ftp_url(&url)?;
 
-        // 建立连接
-        self.connect(&info.host, info.port).await?;
+            this.connect(&info.host, info.port).await?;
 
-        // 登录(使用 URL 中的凭据或匿名登录)
-        if let Err(e) = self.login(&info.username, &info.password).await {
-            self.disconnect().await;
-            return Err(e);
-        }
+            if let Err(e) = this.login(&info.username, &info.password).await {
+                this.disconnect().await;
+                return Err(e);
+            }
 
-        // 获取文件大小
-        let size_result = self.file_size(&info.path).await;
+            let size_result = this.file_size(&info.path).await;
 
-        // 断开连接(无论成功或失败)
-        self.disconnect().await;
+            this.disconnect().await;
 
-        let file_size = Some(size_result?);
+            let file_size = Some(size_result?);
 
-        Ok(FileMetadata {
-            file_name: Self::extract_filename_from_path(&info.path),
-            file_size,
-            content_type: None,
-            supports_range: false, // FTP 不原生支持 Range 请求
-            etag: None,
-            last_modified: None,
+            Ok(FileMetadata {
+                file_name: Self::extract_filename_from_path(&info.path),
+                file_size,
+                content_type: None,
+                supports_range: false,
+                etag: None,
+                last_modified: None,
+            })
         })
     }
 
-    /// 按字节范围下载文件
-    ///
-    /// 使用 FTP REST 命令从指定偏移处恢复下载,然后截取所需范围。
-    /// 相比下载整个文件再切片,此方法在大文件场景下可节省大量带宽和时间。
-    /// `start` 和 `end` 均为闭区间字节偏移。
-    async fn download_range(&self, url: &str, start: u64, end: u64) -> QfResult<Bytes> {
-        if start == 0 && end == 0 {
-            return self.download_full(url).await;
-        }
+    fn download_range(&self, url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+        let url = url.to_owned();
+        let this = self.clone();
+        Box::pin(async move {
+            if start == 0 && end == 0 {
+                return this.download_full(&url).await;
+            }
 
-        let info = Self::parse_ftp_url(url)?;
+            let info = Self::parse_ftp_url(&url)?;
 
-        self.connect(&info.host, info.port).await?;
-        if let Err(e) = self.login(&info.username, &info.password).await {
-            self.disconnect().await;
-            return Err(e);
-        }
+            this.connect(&info.host, info.port).await?;
+            if let Err(e) = this.login(&info.username, &info.password).await {
+                this.disconnect().await;
+                return Err(e);
+            }
 
-        let result = self.retrieve_range(&info.path, start, end).await;
-        self.disconnect().await;
-        result
+            let result = this.retrieve_range(&info.path, start, end).await;
+            this.disconnect().await;
+            result
+        })
     }
 
-    /// 流式下载:当前实现与 download_range 相同,后续将改为流式读取
-    async fn download_range_stream(&self, url: &str, start: u64, end: u64) -> QfResult<Bytes> {
-        self.download_range(url, start, end).await
+    fn download_range_stream(&self, url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+        let url = url.to_owned();
+        let this = self.clone();
+        Box::pin(async move {
+            this.download_range(&url, start, end).await
+        })
     }
 
-    /// 下载整个 FTP 文件
-    ///
-    /// 完整流程: 解析 URL -> 连接 -> 登录 -> 设置 Binary 模式 -> RETR -> 断开。
-    async fn download_full(&self, url: &str) -> QfResult<Bytes> {
-        let info = Self::parse_ftp_url(url)?;
+    fn download_full(&self, url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+        let url = url.to_owned();
+        let this = self.clone();
+        Box::pin(async move {
+            let info = Self::parse_ftp_url(&url)?;
 
-        self.connect(&info.host, info.port).await?;
+            this.connect(&info.host, info.port).await?;
 
-        if let Err(e) = self.login(&info.username, &info.password).await {
-            self.disconnect().await;
-            return Err(e);
-        }
+            if let Err(e) = this.login(&info.username, &info.password).await {
+                this.disconnect().await;
+                return Err(e);
+            }
 
-        let result = self.retrieve(&info.path).await;
+            let result = this.retrieve(&info.path).await;
 
-        self.disconnect().await;
+            this.disconnect().await;
 
-        result
+            result
+        })
     }
 }
 

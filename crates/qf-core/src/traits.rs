@@ -2,6 +2,9 @@
 //!
 //! 所有 crate 共享的公共接口抽象
 
+use std::future::Future;
+use std::pin::Pin;
+
 use bytes::Bytes;
 
 use crate::config::DownloadConfig;
@@ -9,9 +12,15 @@ use crate::error::QfResult;
 use crate::types::{FileMetadata, FragmentInfo, TaskId};
 
 /// 协议层 trait:负责与远程服务器通信
+///
+/// 使用 `Pin<Box<dyn Future>>` 返回类型以满足 object-safe 条件,
+/// 支持 `Arc<dyn Protocol>` 动态分发。
+///
+/// 返回的 Future 生命周期为 `'static`,因为 `Arc<dyn Protocol>` 持有协议实例的所有权,
+/// 调用方在 await 期间自行保证 self 和 url 的借用有效性。
 pub trait Protocol: Send + Sync {
     /// 探测远程文件元数据(大小、是否支持 Range 等)
-    fn probe(&self, url: &str) -> impl std::future::Future<Output = QfResult<FileMetadata>> + Send;
+    fn probe(&self, url: &str) -> Pin<Box<dyn Future<Output = QfResult<FileMetadata>> + Send>>;
 
     /// 下载指定字节范围的数据
     fn download_range(
@@ -19,7 +28,7 @@ pub trait Protocol: Send + Sync {
         url: &str,
         start: u64,
         end: u64,
-    ) -> impl std::future::Future<Output = QfResult<Bytes>> + Send;
+    ) -> Pin<Box<dyn Future<Output = QfResult<Bytes>> + Send>>;
 
     /// 流式下载指定字节范围的数据
     ///
@@ -30,11 +39,11 @@ pub trait Protocol: Send + Sync {
         url: &str,
         start: u64,
         end: u64,
-    ) -> impl std::future::Future<Output = QfResult<Bytes>> + Send;
+    ) -> Pin<Box<dyn Future<Output = QfResult<Bytes>> + Send>>;
 
     /// 下载整个文件(不支持 Range 时使用)
     fn download_full(&self, url: &str)
-    -> impl std::future::Future<Output = QfResult<Bytes>> + Send;
+    -> Pin<Box<dyn Future<Output = QfResult<Bytes>> + Send>>;
 }
 
 /// 存储层 trait:负责数据持久化

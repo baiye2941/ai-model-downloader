@@ -8,6 +8,8 @@ pub mod harness {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use std::pin::Pin;
+
     use crate::config::DownloadConfig;
     use crate::error::{QfError, QfResult};
     use crate::traits::{Protocol, Storage};
@@ -57,29 +59,42 @@ pub mod harness {
     }
 
     impl Protocol for MockProtocol {
-        async fn probe(&self, _url: &str) -> QfResult<FileMetadata> {
-            if let Some(ref meta) = self.metadata {
-                Ok(meta.clone())
-            } else {
-                Err(QfError::Network(self.error_msg.clone().unwrap_or_default()))
-            }
+        fn probe(&self, _url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
+            let this = self.clone();
+            Box::pin(async move {
+                if let Some(ref meta) = this.metadata {
+                    Ok(meta.clone())
+                } else {
+                    Err(QfError::Network(this.error_msg.clone().unwrap_or_default()))
+                }
+            })
         }
 
-        async fn download_range(&self, _url: &str, start: u64, end: u64) -> QfResult<Bytes> {
-            let data = self.range_data.lock().unwrap();
-            data.get(&(start, end))
-                .cloned()
-                .ok_or_else(|| QfError::Network(format!("未找到范围数据: {start}-{end}")))
+        fn download_range(&self, _url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+            let this = self.clone();
+            Box::pin(async move {
+                let data = this.range_data.lock().unwrap();
+                data.get(&(start, end))
+                    .cloned()
+                    .ok_or_else(|| QfError::Network(format!("未找到范围数据: {start}-{end}")))
+            })
         }
 
-        async fn download_range_stream(&self, url: &str, start: u64, end: u64) -> QfResult<Bytes> {
-            self.download_range(url, start, end).await
+        fn download_range_stream(&self, url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+            let this = self.clone();
+            let url = url.to_owned();
+            Box::pin(async move {
+                this.download_range(&url, start, end).await
+            })
         }
 
-        async fn download_full(&self, _url: &str) -> QfResult<Bytes> {
-            self.default_data
-                .clone()
-                .ok_or_else(|| QfError::Protocol("不支持全量下载".into()))
+        fn download_full(&self, _url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+            let this = self.clone();
+            Box::pin(async move {
+                this.default_data
+                    .clone()
+                    .ok_or_else(|| QfError::Protocol("不支持全量下载".into()))
+            })
         }
     }
 

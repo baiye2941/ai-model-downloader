@@ -14,6 +14,8 @@
 //! - Range 请求(分片下载)
 //! - 全量下载
 
+use std::pin::Pin;
+
 use bytes::Bytes;
 #[cfg(test)]
 use qf_core::filename::{extract_filename_from_url, parse_content_disposition};
@@ -458,34 +460,57 @@ impl rustls::client::danger::ServerCertVerifier for InsecureVerifier {
 // ---------------------------------------------------------------------------
 
 impl Protocol for QuicTransport {
-    /// 通过 QUIC 连接发送 HTTP/1.1 HEAD 请求探测文件元数据
-    async fn probe(&self, url: &str) -> QfResult<FileMetadata> {
-        let conn = self.require_connection()?;
-        let request = build_head_request(url)?;
-        let response_bytes = send_request(conn, &request).await?;
-        let response = String::from_utf8_lossy(&response_bytes);
-        parse_head_response(&response, url)
+    fn probe(&self, url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<FileMetadata>> + Send>> {
+        let conn = match self.require_connection() {
+            Ok(c) => c.clone(),
+            Err(e) => return Box::pin(async move { Err(e) }),
+        };
+        let url = url.to_owned();
+        Box::pin(async move {
+            let request = build_head_request(&url)?;
+            let response_bytes = send_request(&conn, &request).await?;
+            let response = String::from_utf8_lossy(&response_bytes);
+            parse_head_response(&response, &url)
+        })
     }
 
-    /// 通过 QUIC 连接发送带 Range 头的 GET 请求下载指定字节范围
-    async fn download_range(&self, url: &str, start: u64, end: u64) -> QfResult<Bytes> {
-        let conn = self.require_connection()?;
-        let request = build_range_request(url, start, end)?;
-        let response_bytes = send_request(conn, &request).await?;
-        parse_body_response(&response_bytes)
+    fn download_range(&self, url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+        let conn = match self.require_connection() {
+            Ok(c) => c.clone(),
+            Err(e) => return Box::pin(async move { Err(e) }),
+        };
+        let url = url.to_owned();
+        Box::pin(async move {
+            let request = build_range_request(&url, start, end)?;
+            let response_bytes = send_request(&conn, &request).await?;
+            parse_body_response(&response_bytes)
+        })
     }
 
-    /// 流式下载:当前实现与 download_range 相同,后续将改为流式读取
-    async fn download_range_stream(&self, url: &str, start: u64, end: u64) -> QfResult<Bytes> {
-        self.download_range(url, start, end).await
+    fn download_range_stream(&self, url: &str, start: u64, end: u64) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+        let conn = match self.require_connection() {
+            Ok(c) => c.clone(),
+            Err(e) => return Box::pin(async move { Err(e) }),
+        };
+        let url = url.to_owned();
+        Box::pin(async move {
+            let request = build_range_request(&url, start, end)?;
+            let response_bytes = send_request(&conn, &request).await?;
+            parse_body_response(&response_bytes)
+        })
     }
 
-    /// 通过 QUIC 连接发送普通 GET 请求下载完整文件
-    async fn download_full(&self, url: &str) -> QfResult<Bytes> {
-        let conn = self.require_connection()?;
-        let request = build_full_request(url)?;
-        let response_bytes = send_request(conn, &request).await?;
-        parse_body_response(&response_bytes)
+    fn download_full(&self, url: &str) -> Pin<Box<dyn std::future::Future<Output = QfResult<Bytes>> + Send>> {
+        let conn = match self.require_connection() {
+            Ok(c) => c.clone(),
+            Err(e) => return Box::pin(async move { Err(e) }),
+        };
+        let url = url.to_owned();
+        Box::pin(async move {
+            let request = build_full_request(&url)?;
+            let response_bytes = send_request(&conn, &request).await?;
+            parse_body_response(&response_bytes)
+        })
     }
 }
 

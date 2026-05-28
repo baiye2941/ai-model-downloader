@@ -11,7 +11,6 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -30,87 +29,10 @@ use qf_protocol::http::HttpClient;
 use crate::fragment::FragmentRecord;
 use crate::orchestrator::DownloadOrchestrator;
 
-// 测试模式下引入 mock 实现
 #[cfg(test)]
 use qf_core::test_harness::harness::MemoryStorage as MemStorage;
 #[cfg(test)]
 use qf_core::test_harness::harness::MockProtocol as MockProto;
-
-// ---------------------------------------------------------------------------
-// ProtocolKind: 协议类型枚举
-// ---------------------------------------------------------------------------
-
-/// 协议类型枚举
-///
-/// `Protocol` trait 使用 RPITIT,不满足 object-safe 条件,
-/// 因此通过 enum 实现静态分发。后续可扩展 QUIC、FTP 等变体。
-pub enum ProtocolKind {
-    /// HTTP/HTTPS 协议
-    Http(HttpClient),
-    #[cfg(test)]
-    /// Mock 协议,仅在测试模式下可用
-    Mock(MockProto),
-}
-
-// reqwest::Client 内部是 Arc,clone 开销极低
-impl Clone for ProtocolKind {
-    fn clone(&self) -> Self {
-        match self {
-            ProtocolKind::Http(c) => ProtocolKind::Http(HttpClient::with_client(c.inner().clone())),
-            #[cfg(test)]
-            ProtocolKind::Mock(m) => ProtocolKind::Mock(m.clone()),
-        }
-    }
-}
-
-impl ProtocolKind {
-    /// 根据 URL scheme 自动选择协议
-    fn from_url(url: &str) -> QfResult<Self> {
-        if url.starts_with("http://") || url.starts_with("https://") {
-            Ok(ProtocolKind::Http(HttpClient::new()?))
-        } else {
-            #[cfg(test)]
-            {
-                // 测试模式下对未知 scheme 也返回 Http,由 probe 阶段报错
-                Ok(ProtocolKind::Http(HttpClient::new()?))
-            }
-            #[cfg(not(test))]
-            {
-                Err(QfError::Config(format!("不支持的协议: {url}")))
-            }
-        }
-    }
-
-    /// 探测文件元数据
-    async fn probe(&self, url: &str) -> QfResult<FileMetadata> {
-        match self {
-            ProtocolKind::Http(c) => c.probe(url).await,
-            #[cfg(test)]
-            ProtocolKind::Mock(c) => c.probe(url).await,
-        }
-    }
-
-    /// 下载数据:有 range 时使用 Range 请求,无 range 时整块下载
-    async fn download(&self, url: &str, range: Option<(u64, u64)>) -> QfResult<Bytes> {
-        match self {
-            ProtocolKind::Http(c) => {
-                if let Some((start, end)) = range {
-                    c.download_range(url, start, end).await
-                } else {
-                    c.download_full(url).await
-                }
-            }
-            #[cfg(test)]
-            ProtocolKind::Mock(c) => {
-                if let Some((start, end)) = range {
-                    c.download_range(url, start, end).await
-                } else {
-                    c.download_full(url).await
-                }
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // StorageKind: 存储类型枚举
@@ -239,7 +161,7 @@ pub struct DownloadTask {
     /// 下载配置
     pub config: DownloadConfig,
     /// 协议客户端
-    protocol: ProtocolKind,
+    protocol: Arc<dyn Protocol>,
     /// 存储后端
     storage: Arc<StorageKind>,
     /// 校验器
@@ -260,10 +182,13 @@ impl DownloadTask {
     /// 根据 URL scheme 自动选择协议后端,使用默认 blake3 校验器。
     /// 存储文件位于 `config.download_dir` 目录下,文件名在 `probe` 阶段确定。
     pub async fn new(url: String, config: DownloadConfig) -> QfResult<Self> {
-        // 解析 URL 验证合法性
         let _parsed = url::Url::parse(&url)?;
 
-        let protocol = ProtocolKind::from_url(&url)?;
+        let protocol: Arc<dyn Protocol> = if url.starts_with("http://") || url.starts_with("https://") {
+            Arc::new(HttpClient::new()?)
+        } else {
+            return Err(QfError::Config(format!("不支持的协议: {url}")));
+        };
         let storage_path = std::path::Path::new(&config.download_dir).join("qf_temp_download");
         let storage = Arc::new(StorageKind::open(&storage_path).await?);
 
@@ -288,7 +213,7 @@ impl DownloadTask {
     fn new_for_test(
         url: String,
         config: DownloadConfig,
-        protocol: ProtocolKind,
+        protocol: Arc<dyn Protocol>,
         storage: StorageKind,
     ) -> Self {
         Self {
@@ -406,7 +331,7 @@ impl DownloadTask {
 
     /// 整块下载(不支持 Range 或单分片)
     async fn execute_full_download(&mut self) -> QfResult<()> {
-        let data = self.protocol.download(&self.url, None).await?;
+        let data = self.protocol.download_full(&self.url).await?;
         let written = self.storage.write_at(0, &data).await?;
         debug!(written, "整块下载写入完成");
 
@@ -426,7 +351,6 @@ impl DownloadTask {
         let storage = self.storage.clone();
         let protocol = self.protocol.clone();
 
-        // 构建分片下载任务
         let mut handles: Vec<JoinHandle<QfResult<(u32, u64)>>> = Vec::new();
 
         for frag in &self.fragments {
@@ -444,7 +368,7 @@ impl DownloadTask {
             let frag_end = frag.info.end;
 
             let handle = tokio::spawn(async move {
-                let _permit = permit; // 持有许可直至任务完成
+                let _permit = permit;
 
                 debug!(
                     index = frag_index,
@@ -454,7 +378,7 @@ impl DownloadTask {
                 );
 
                 let data = frag_protocol
-                    .download(&frag_url, Some((frag_start, frag_end)))
+                    .download_range(&frag_url, frag_start, frag_end)
                     .await?;
 
                 let written = frag_storage.write_at(frag_start, &data).await?;
@@ -466,7 +390,6 @@ impl DownloadTask {
             handles.push(handle);
         }
 
-        // 等待全部分片完成,更新进度
         for handle in handles {
             let result = handle
                 .await
@@ -625,7 +548,7 @@ mod tests {
 
     /// 辅助函数:创建带 mock 协议和存储的测试任务
     fn make_task(
-        protocol: ProtocolKind,
+        protocol: Arc<dyn Protocol>,
         storage: StorageKind,
         config: DownloadConfig,
     ) -> DownloadTask {
@@ -658,7 +581,7 @@ mod tests {
     #[tokio::test]
     async fn test_probe_fetches_metadata() {
         let meta = test_metadata("data.zip", 2048);
-        let protocol = ProtocolKind::Mock(MockProto::new(meta.clone()));
+        let protocol = Arc::new(MockProto::new(meta.clone()));
         let storage = StorageKind::memory();
         let mut task = make_task(protocol, storage, test_config());
 
@@ -673,7 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_probe_propagates_error() {
-        let protocol = ProtocolKind::Mock(MockProto::failing(QfError::Network("连接超时".into())));
+        let protocol = Arc::new(MockProto::failing(QfError::Network("连接超时".into())));
         let storage = StorageKind::memory();
         let mut task = make_task(protocol, storage, test_config());
 
@@ -686,7 +609,7 @@ mod tests {
     #[tokio::test]
     async fn test_plan_generates_fragments() {
         let meta = test_metadata("large.bin", 10_000);
-        let protocol = ProtocolKind::Mock(MockProto::new(meta));
+        let protocol = Arc::new(MockProto::new(meta));
         let storage = StorageKind::memory();
         let mut task = make_task(protocol, storage, test_config());
 
@@ -703,7 +626,7 @@ mod tests {
 
     #[test]
     fn test_plan_without_probe_fails() {
-        let protocol = ProtocolKind::Mock(MockProto::new(test_metadata("f.bin", 100)));
+        let protocol = Arc::new(MockProto::new(test_metadata("f.bin", 100)));
         let storage = StorageKind::memory();
         let mut task = make_task(protocol, storage, test_config());
 
@@ -718,7 +641,7 @@ mod tests {
     async fn test_prepare_storage_allocates() {
         let file_size = 4096u64;
         let meta = test_metadata("alloc.bin", file_size);
-        let protocol = ProtocolKind::Mock(MockProto::new(meta));
+        let protocol = Arc::new(MockProto::new(meta));
         let storage = StorageKind::memory();
         let mut task = make_task(protocol, storage, test_config());
 
@@ -752,7 +675,7 @@ mod tests {
             last_modified: None,
         };
 
-        let protocol = ProtocolKind::Mock(
+        let protocol: Arc<dyn Protocol> = Arc::new(
             MockProto::new(meta)
                 .with_range_data(0, frag_size - 1, frag_a.clone())
                 .with_range_data(frag_size, 2 * frag_size - 1, frag_b.clone())
@@ -813,7 +736,7 @@ mod tests {
             last_modified: None,
         };
 
-        let protocol = ProtocolKind::Mock(MockProto::new(meta).with_default_data(data.clone()));
+        let protocol = Arc::new(MockProto::new(meta).with_default_data(data.clone()));
 
         let storage = StorageKind::memory_with_capacity(data.len());
 
@@ -838,7 +761,7 @@ mod tests {
 
     #[test]
     fn test_progress_tracking() {
-        let protocol = ProtocolKind::Mock(MockProto::new(test_metadata("p.bin", 100)));
+        let protocol = Arc::new(MockProto::new(test_metadata("p.bin", 100)));
         let storage = StorageKind::memory();
         let mut task = make_task(protocol, storage, test_config());
 
@@ -886,7 +809,7 @@ mod tests {
 
     #[test]
     fn test_progress_no_fragments_is_zero() {
-        let protocol = ProtocolKind::Mock(MockProto::new(test_metadata("e.bin", 100)));
+        let protocol = Arc::new(MockProto::new(test_metadata("e.bin", 100)));
         let storage = StorageKind::memory();
         let task = make_task(protocol, storage, test_config());
         assert!((task.progress() - 0.0).abs() < f64::EPSILON);
@@ -898,7 +821,7 @@ mod tests {
     async fn test_state_transitions() {
         let meta = test_metadata("state.bin", 100);
         let default_data = Bytes::from(vec![0u8; 100]);
-        let protocol = ProtocolKind::Mock(MockProto::new(meta).with_default_data(default_data));
+        let protocol = Arc::new(MockProto::new(meta).with_default_data(default_data));
         let storage = StorageKind::memory_with_capacity(100);
         let mut task = make_task(protocol, storage, test_config());
 
@@ -935,7 +858,7 @@ mod tests {
             protocol_mock = protocol_mock.with_range_data(start, end, data);
         }
 
-        let protocol = ProtocolKind::Mock(protocol_mock);
+        let protocol: Arc<dyn Protocol> = Arc::new(protocol_mock);
         let storage = StorageKind::memory_with_capacity(total_size as usize);
         let config = DownloadConfig {
             max_concurrent_fragments: 2, // 限制并发为 2
@@ -988,7 +911,7 @@ mod tests {
         };
 
         let protocol =
-            ProtocolKind::Mock(MockProto::new(test_metadata("v.bin", data.len() as u64)));
+            Arc::new(MockProto::new(test_metadata("v.bin", data.len() as u64)));
         let storage = StorageKind::memory_with_capacity(data.len());
 
         let mut task = make_task(
@@ -1025,7 +948,7 @@ mod tests {
         };
 
         let protocol =
-            ProtocolKind::Mock(MockProto::new(test_metadata("c.bin", data.len() as u64)));
+            Arc::new(MockProto::new(test_metadata("c.bin", data.len() as u64)));
         let storage = StorageKind::memory_with_capacity(data.len());
 
         let mut task = make_task(
@@ -1049,7 +972,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_skipped_when_disabled() {
-        let protocol = ProtocolKind::Mock(MockProto::new(test_metadata("s.bin", 100)));
+        let protocol = Arc::new(MockProto::new(test_metadata("s.bin", 100)));
         let storage = StorageKind::memory();
         let mut task = make_task(
             protocol,
@@ -1075,7 +998,7 @@ mod tests {
             etag: None,
             last_modified: None,
         };
-        let protocol = ProtocolKind::Mock(MockProto::new(meta));
+        let protocol = Arc::new(MockProto::new(meta));
         let storage = StorageKind::memory();
         let mut task = make_task(
             protocol,
@@ -1108,7 +1031,7 @@ mod tests {
             etag: None,
             last_modified: None,
         };
-        let protocol = ProtocolKind::Mock(MockProto::new(meta));
+        let protocol = Arc::new(MockProto::new(meta));
         let storage = StorageKind::memory();
         let mut task = make_task(
             protocol,
@@ -1129,7 +1052,7 @@ mod tests {
 
     #[test]
     fn test_progress_zero_size_fragments() {
-        let protocol = ProtocolKind::Mock(MockProto::new(test_metadata("z.bin", 0)));
+        let protocol = Arc::new(MockProto::new(test_metadata("z.bin", 0)));
         let storage = StorageKind::memory();
         let mut task = make_task(protocol, storage, test_config());
 
@@ -1175,7 +1098,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_failure_marks_state() {
-        let protocol = ProtocolKind::Mock(MockProto::failing(QfError::Network("断网".into())));
+        let protocol = Arc::new(MockProto::failing(QfError::Network("断网".into())));
         let storage = StorageKind::memory();
         let mut task = make_task(
             protocol,
