@@ -4,6 +4,8 @@ import type { ViewName } from './types'
 import Layout from './components/Layout'
 import TaskList from './components/TaskList'
 import DetailPanel from './components/DetailPanel'
+import SnifferPanel from './components/SnifferPanel'
+import SettingsPanel from './components/SettingsPanel'
 
 export default function App() {
   const [currentView, setCurrentView] = createSignal<ViewName>('downloads')
@@ -19,8 +21,8 @@ export default function App() {
       }
     >
       {currentView() === 'downloads' && <TaskList />}
-      {currentView() === 'sniffer' && <div>SnifferPanel (待迁移)</div>}
-      {currentView() === 'settings' && <div>SettingsPanel (待迁移)</div>}
+      {currentView() === 'sniffer' && <SnifferPanel />}
+      {currentView() === 'settings' && <SettingsPanel />}
     </Layout>
   )
 }
