@@ -26,6 +26,7 @@ use qf_io::TokioFile;
 use qf_io::storage::AsyncStorage;
 use qf_protocol::http::HttpClient;
 
+use crate::connection::ConnectionPool;
 use crate::fragment::FragmentRecord;
 use crate::orchestrator::DownloadOrchestrator;
 
@@ -154,25 +155,17 @@ impl VerifierKind {
 ///
 /// 串联协议层、存储层、校验层,提供完整的下载编排流程。
 pub struct DownloadTask {
-    /// 任务 ID
     pub id: TaskId,
-    /// 下载 URL
     pub url: String,
-    /// 下载配置
     pub config: DownloadConfig,
-    /// 协议客户端
     protocol: Arc<dyn Protocol>,
-    /// 存储后端
     storage: Arc<StorageKind>,
-    /// 校验器
     verifier: VerifierKind,
-    /// 编排器(分片策略与带宽追踪)
     orchestrator: DownloadOrchestrator,
-    /// 当前状态
+    #[allow(dead_code)]
+    pool: Option<Arc<ConnectionPool>>,
     state: DownloadState,
-    /// 文件元数据(探测后填充)
     metadata: Option<FileMetadata>,
-    /// 分片记录(规划后填充)
     fragments: Vec<FragmentRecord>,
 }
 
@@ -182,6 +175,15 @@ impl DownloadTask {
     /// 根据 URL scheme 自动选择协议后端,使用默认 blake3 校验器。
     /// 存储文件位于 `config.download_dir` 目录下,文件名在 `probe` 阶段确定。
     pub async fn new(url: String, config: DownloadConfig) -> QfResult<Self> {
+        Self::with_pool(url, config, None).await
+    }
+
+    pub async fn with_pool(
+        url: String,
+        config: DownloadConfig,
+    #[allow(dead_code)]
+    pool: Option<Arc<ConnectionPool>>,
+    ) -> QfResult<Self> {
         let _parsed = url::Url::parse(&url)?;
 
         let protocol: Arc<dyn Protocol> =
@@ -193,6 +195,14 @@ impl DownloadTask {
         let storage_path = std::path::Path::new(&config.download_dir).join("qf_temp_download");
         let storage = Arc::new(StorageKind::open(&storage_path).await?);
 
+        let orchestrator = match &pool {
+            Some(p) => DownloadOrchestrator::with_shared_pool(
+                p.clone(),
+                Default::default(),
+            ),
+            None => DownloadOrchestrator::new(Default::default()),
+        };
+
         Ok(Self {
             id: TaskId::new_v4(),
             url,
@@ -200,16 +210,14 @@ impl DownloadTask {
             protocol,
             storage,
             verifier: VerifierKind::blake3(),
-            orchestrator: DownloadOrchestrator::new(Default::default()),
+            orchestrator,
+            pool,
             state: DownloadState::Pending,
             metadata: None,
             fragments: Vec::new(),
         })
     }
 
-    /// 使用测试辅助构造器(仅测试模式)
-    ///
-    /// 允许注入 mock 协议和存储,避免真实网络和文件 I/O。
     #[cfg(test)]
     fn new_for_test(
         url: String,
@@ -225,6 +233,7 @@ impl DownloadTask {
             storage: Arc::new(storage),
             verifier: VerifierKind::blake3(),
             orchestrator: DownloadOrchestrator::new(Default::default()),
+            pool: None,
             state: DownloadState::Pending,
             metadata: None,
             fragments: Vec::new(),

@@ -14,13 +14,36 @@ export interface TaskInfo {
   createdAt: string
 }
 
-export interface AppConfig {
+export interface DownloadConfig {
   downloadDir: string
-  maxConcurrentTasks: number
   maxConcurrentFragments: number
-  maxConnectionsPerHost: number
-  enableQuic: boolean
+  maxRetries: number
+  requestTimeoutSecs: number
   verifyChecksum: boolean
+  userAgent: string
+}
+
+export interface ConnectionConfig {
+  maxConnectionsPerHost: number
+  maxGlobalConnections: number
+  keepAliveTimeoutSecs: number
+  connectTimeoutSecs: number
+  enableHttp2: boolean
+  enableQuic: boolean
+}
+
+export interface SchedulerConfig {
+  minFragmentSize: number
+  maxFragmentSize: number
+  samplingIntervalSecs: number
+  ewmaAlpha: number
+}
+
+export interface AppConfig {
+  maxConcurrentTasks: number
+  download: DownloadConfig
+  connection: ConnectionConfig
+  scheduler: SchedulerConfig
 }
 
 export type SnifferResourceType = 'video' | 'audio' | 'document' | 'archive' | 'executable' | 'image' | 'other'

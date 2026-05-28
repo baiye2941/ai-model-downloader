@@ -31,12 +31,12 @@ export default function SettingsPanel() {
     try {
       const cfg = await api.getConfig()
       $config.set(cfg)
-      setDir(cfg.downloadDir)
+      setDir(cfg.download.downloadDir)
       setMaxTasks(cfg.maxConcurrentTasks)
-      setMaxFragments(cfg.maxConcurrentFragments)
-      setMaxConnections(cfg.maxConnectionsPerHost)
-      setQuicEnabled(cfg.enableQuic)
-      setVerifyEnabled(cfg.verifyChecksum)
+      setMaxFragments(cfg.download.maxConcurrentFragments)
+      setMaxConnections(cfg.connection.maxConnectionsPerHost)
+      setQuicEnabled(cfg.connection.enableQuic)
+      setVerifyEnabled(cfg.download.verifyChecksum)
     } catch {
       // Tauri 未就绪时使用默认值
     } finally {
@@ -46,12 +46,23 @@ export default function SettingsPanel() {
 
   async function handleSave() {
     const cfg: Partial<AppConfig> = {
-      downloadDir: dir(),
       maxConcurrentTasks: maxTasks(),
-      maxConcurrentFragments: maxFragments(),
-      maxConnectionsPerHost: maxConnections(),
-      enableQuic: quicEnabled(),
-      verifyChecksum: verifyEnabled(),
+      download: {
+        downloadDir: dir(),
+        maxConcurrentFragments: maxFragments(),
+        verifyChecksum: verifyEnabled(),
+        maxRetries: 3,
+        requestTimeoutSecs: 30,
+        userAgent: '',
+      },
+      connection: {
+        maxConnectionsPerHost: maxConnections(),
+        enableQuic: quicEnabled(),
+        maxGlobalConnections: 256,
+        keepAliveTimeoutSecs: 30,
+        connectTimeoutSecs: 10,
+        enableHttp2: true,
+      },
     }
     try {
       await api.updateConfig(cfg)

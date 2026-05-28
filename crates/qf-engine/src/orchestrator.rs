@@ -8,6 +8,8 @@
 
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use qf_core::config::SchedulerConfig;
 use qf_core::types::FragmentInfo;
 
@@ -16,36 +18,37 @@ use crate::fragment::{BandwidthTracker, FragmentRecord, compute_fragment_size};
 
 /// 下载编排器,统一管理分片策略、连接池与带宽追踪
 pub struct DownloadOrchestrator {
-    /// 连接池
-    pool: ConnectionPool,
-    /// 带宽追踪器(EWMA)
+    pool: Arc<ConnectionPool>,
     bandwidth: BandwidthTracker,
-    /// 调度器配置(分片大小约束)
     scheduler_config: SchedulerConfig,
-    /// 活跃分片记录
     active_fragments: Vec<FragmentRecord>,
 }
 
 impl DownloadOrchestrator {
-    /// 创建新的下载编排器
-    ///
-    /// 使用默认 `SchedulerConfig` 和默认 EWMA alpha (0.3)。
     pub fn new(pool_config: PoolConfig) -> Self {
         Self {
-            pool: ConnectionPool::new(pool_config),
+            pool: Arc::new(ConnectionPool::new(pool_config)),
             bandwidth: BandwidthTracker::default(),
             scheduler_config: SchedulerConfig::default(),
             active_fragments: Vec::new(),
         }
     }
 
-    /// 使用自定义调度器配置创建编排器
+    pub fn with_shared_pool(pool: Arc<ConnectionPool>, scheduler_config: SchedulerConfig) -> Self {
+        Self {
+            pool,
+            bandwidth: BandwidthTracker::new(scheduler_config.ewma_alpha),
+            scheduler_config,
+            active_fragments: Vec::new(),
+        }
+    }
+
     pub fn with_scheduler_config(
         pool_config: PoolConfig,
         scheduler_config: SchedulerConfig,
     ) -> Self {
         Self {
-            pool: ConnectionPool::new(pool_config),
+            pool: Arc::new(ConnectionPool::new(pool_config)),
             bandwidth: BandwidthTracker::new(scheduler_config.ewma_alpha),
             scheduler_config,
             active_fragments: Vec::new(),
@@ -162,13 +165,11 @@ impl DownloadOrchestrator {
         self.bandwidth.estimate()
     }
 
-    /// 获取连接池当前活跃连接数
     pub fn active_connections(&self) -> u32 {
         self.pool.active_connections()
     }
 
-    /// 获取连接池的不可变引用
-    pub fn pool(&self) -> &ConnectionPool {
+    pub fn pool(&self) -> &Arc<ConnectionPool> {
         &self.pool
     }
 

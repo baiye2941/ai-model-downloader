@@ -6,6 +6,7 @@ pub const USER_AGENT: &str = "QuantumFetch/0.1.0";
 
 /// 下载配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DownloadConfig {
     /// 下载目录
     pub download_dir: String,
@@ -41,6 +42,7 @@ impl Default for DownloadConfig {
 
 /// 连接配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectionConfig {
     /// 单主机最大连接数
     pub max_connections_per_host: u32,
@@ -71,6 +73,7 @@ impl Default for ConnectionConfig {
 
 /// 调度器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SchedulerConfig {
     /// 最小分片大小(字节)
     pub min_fragment_size: u64,
@@ -100,6 +103,7 @@ pub fn dirs() -> Option<std::path::PathBuf> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     /// 最大并发任务数
     pub max_concurrent_tasks: u32,

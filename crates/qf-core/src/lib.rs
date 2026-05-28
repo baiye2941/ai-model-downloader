@@ -192,7 +192,7 @@ fn app_config() {
 
     // 序列化往返
     let json = serde_json::to_string(&cfg).unwrap();
-    assert!(json.contains("download_dir"), "JSON 应包含字段名: {json}");
+    assert!(json.contains("downloadDir"), "JSON 应包含字段名: {json}");
     let restored: config::DownloadConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.download_dir, cfg.download_dir);
     assert_eq!(

@@ -5,12 +5,10 @@ use std::time::{Duration, Instant};
 
 use chrono::Local;
 use dashmap::DashMap;
-use qf_core::config::DownloadConfig;
-use qf_core::config::USER_AGENT;
+use qf_core::config::{AppConfig, ConnectionConfig, DownloadConfig, USER_AGENT};
 use qf_core::filename::extract_filename_from_url;
 use qf_core::types::DownloadState;
 use qf_engine::DownloadTask;
-#[allow(unused_imports)]
 use qf_engine::connection::{ConnectionPool, PoolConfig};
 use qf_sniffer::capture::{ResourceType, identify_resource};
 use serde::{Deserialize, Serialize};
@@ -89,32 +87,6 @@ pub struct TaskInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AppConfig {
-    pub download_dir: String,
-    pub max_concurrent_tasks: u32,
-    pub max_concurrent_fragments: u32,
-    pub max_connections_per_host: u32,
-    pub enable_quic: bool,
-    pub verify_checksum: bool,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            download_dir: dirs()
-                .map(|p| p.join("Downloads").to_string_lossy().to_string())
-                .unwrap_or_else(|| ".".to_string()),
-            max_concurrent_tasks: 5,
-            max_concurrent_fragments: 16,
-            max_connections_per_host: 16,
-            enable_quic: false,
-            verify_checksum: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadProgress {
     pub task_id: String,
@@ -150,6 +122,7 @@ pub struct AppState {
     pub sniffer: Arc<Mutex<Vec<SnifferResource>>>,
     pub sniffer_filters: Arc<Mutex<Vec<String>>>,
     pub progress_tx: watch::Sender<ProgressEvent>,
+    pub connection_pool: Arc<ConnectionPool>,
 }
 
 impl Default for AppState {
@@ -159,32 +132,27 @@ impl Default for AppState {
 }
 
 impl AppState {
-    pub fn new() -> Self {
+pub fn new() -> Self {
+        let connection_pool = ConnectionPool::new(PoolConfig {
+            max_per_host: 16,
+            max_global: 256,
+        });
         Self {
             tasks: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(Mutex::new(AppConfig {
-                download_dir: dirs()
-                    .map(|p| p.join("Downloads").to_string_lossy().to_string())
-                    .unwrap_or_else(|| ".".to_string()),
                 max_concurrent_tasks: 5,
-                max_concurrent_fragments: 16,
-                max_connections_per_host: 16,
-                enable_quic: false,
-                verify_checksum: true,
+                download: DownloadConfig::default(),
+                connection: ConnectionConfig::default(),
+                scheduler: Default::default(),
             })),
             handles: Arc::new(DashMap::new()),
             active_permits: Arc::new(AtomicU32::new(0)),
             sniffer: Arc::new(Mutex::new(Vec::new())),
             sniffer_filters: Arc::new(Mutex::new(Vec::new())),
             progress_tx: watch::Sender::new(HashMap::new()),
+            connection_pool: Arc::new(connection_pool),
         }
     }
-}
-
-fn dirs() -> Option<std::path::PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(std::path::PathBuf::from)
 }
 
 fn now_iso8601() -> String {
@@ -198,13 +166,13 @@ fn validate_config(config: &AppConfig) -> Result<(), AppError> {
             config.max_concurrent_tasks
         )));
     }
-    if config.max_concurrent_fragments == 0 || config.max_concurrent_fragments > 32 {
+    if config.download.max_concurrent_fragments == 0 || config.download.max_concurrent_fragments > 32 {
         return Err(AppError::Config(format!(
             "max_concurrent_fragments 必须在 1..=32 范围内,当前值: {}",
-            config.max_concurrent_fragments
+            config.download.max_concurrent_fragments
         )));
     }
-    if config.download_dir.is_empty() {
+    if config.download.download_dir.is_empty() {
         return Err(AppError::Config("download_dir 不能为空".to_string()));
     }
     Ok(())
@@ -237,10 +205,10 @@ fn update_task_status(store: &mut HashMap<String, TaskInfo>, task_id: &str, new_
 fn build_download_config(app_config: &AppConfig, download_dir: &str) -> DownloadConfig {
     DownloadConfig {
         download_dir: download_dir.to_string(),
-        max_concurrent_fragments: app_config.max_concurrent_fragments,
+        max_concurrent_fragments: app_config.download.max_concurrent_fragments,
         max_retries: 3,
         request_timeout_secs: 30,
-        verify_checksum: app_config.verify_checksum,
+        verify_checksum: app_config.download.verify_checksum,
         user_agent: USER_AGENT.to_string(),
         headers: std::collections::HashMap::new(),
     }
@@ -252,6 +220,7 @@ async fn task_fn(
     url: String,
     download_dir: String,
     download_config: DownloadConfig,
+    connection_pool: Arc<ConnectionPool>,
 ) {
     let download_url = match Url::parse(&url) {
         Ok(u) => u,
@@ -300,7 +269,7 @@ async fn task_fn(
         return;
     }
 
-    let mut download_task = match DownloadTask::new(url.clone(), download_config).await {
+    let mut download_task = match DownloadTask::with_pool(url.clone(), download_config, Some(connection_pool)).await {
         Ok(t) => t,
         Err(e) => {
             tracing::error!(task_id = %task_id, error = %e, "创建 DownloadTask 失败");
@@ -557,7 +526,7 @@ pub async fn create_task(
 
     let download_dir_str = {
         let cfg = state.config.lock().await;
-        download_dir.unwrap_or_else(|| cfg.download_dir.clone())
+        download_dir.unwrap_or_else(|| cfg.download.download_dir.clone())
     };
 
     let task = TaskInfo {
@@ -592,12 +561,14 @@ pub async fn create_task(
         sniffer: state.sniffer.clone(),
         sniffer_filters: state.sniffer_filters.clone(),
         progress_tx: state.progress_tx.clone(),
+        connection_pool: state.connection_pool.clone(),
     });
 
     let tid = task_id.clone();
     let url_clone = url.clone();
+    let pool_clone = state_arc.connection_pool.clone();
     let handle = tokio::spawn(async move {
-        task_fn(state_arc, tid, url_clone, download_dir_str, download_config).await;
+        task_fn(state_arc, tid, url_clone, download_dir_str, download_config, pool_clone).await;
     });
 
     state.handles.insert(task_id.clone(), handle);
@@ -801,20 +772,20 @@ pub async fn update_config(
     config: AppConfig,
 ) -> Result<(), AppError> {
     let mut cfg = state.config.lock().await;
-    if !config.download_dir.is_empty() {
-        cfg.download_dir = config.download_dir;
+    if !config.download.download_dir.is_empty() {
+        cfg.download.download_dir = config.download.download_dir;
     }
     if config.max_concurrent_tasks > 0 {
         cfg.max_concurrent_tasks = config.max_concurrent_tasks;
     }
-    if config.max_concurrent_fragments > 0 {
-        cfg.max_concurrent_fragments = config.max_concurrent_fragments;
+    if config.download.max_concurrent_fragments > 0 {
+        cfg.download.max_concurrent_fragments = config.download.max_concurrent_fragments;
     }
-    if config.max_connections_per_host > 0 {
-        cfg.max_connections_per_host = config.max_connections_per_host;
+    if config.connection.max_connections_per_host > 0 {
+        cfg.connection.max_connections_per_host = config.connection.max_connections_per_host;
     }
-    cfg.enable_quic = config.enable_quic;
-    cfg.verify_checksum = config.verify_checksum;
+    cfg.connection.enable_quic = config.connection.enable_quic;
+    cfg.download.verify_checksum = config.download.verify_checksum;
     validate_config(&cfg)?;
     tracing::info!("应用配置已更新");
     Ok(())
@@ -895,7 +866,7 @@ async fn create_task_inner(
 
     let download_dir_str = {
         let cfg = state.config.lock().await;
-        download_dir.unwrap_or_else(|| cfg.download_dir.clone())
+        download_dir.unwrap_or_else(|| cfg.download.download_dir.clone())
     };
 
     let task = TaskInfo {
@@ -919,7 +890,7 @@ async fn create_task_inner(
 
     let download_config = {
         let cfg = state.config.lock().await;
-        if cfg.max_concurrent_fragments == 0 {
+        if cfg.download.max_concurrent_fragments == 0 {
             let mut store = state.tasks.lock().await;
             store.remove(&task_id);
             return Err(AppError::Config(
@@ -937,12 +908,14 @@ async fn create_task_inner(
         sniffer: state.sniffer.clone(),
         sniffer_filters: state.sniffer_filters.clone(),
         progress_tx: state.progress_tx.clone(),
+        connection_pool: state.connection_pool.clone(),
     });
 
     let tid = task_id.clone();
     let url_clone = url.clone();
+    let pool_clone = state_arc.connection_pool.clone();
     let handle = tokio::spawn(async move {
-        task_fn(state_arc, tid, url_clone, download_dir_str, download_config).await;
+        task_fn(state_arc, tid, url_clone, download_dir_str, download_config, pool_clone).await;
     });
 
     state.handles.insert(task_id.clone(), handle);
@@ -1089,22 +1062,58 @@ mod tests {
     use super::*;
     use qf_core::filename::parse_content_disposition;
 
+    fn make_test_app_config(
+        max_concurrent_tasks: u32,
+        download_dir: &str,
+        max_concurrent_fragments: u32,
+        max_connections_per_host: u32,
+        enable_quic: bool,
+        verify_checksum: bool,
+    ) -> AppConfig {
+        AppConfig {
+            max_concurrent_tasks,
+            download: qf_core::config::DownloadConfig {
+                download_dir: download_dir.to_string(),
+                max_concurrent_fragments,
+                max_retries: 3,
+                request_timeout_secs: 30,
+                verify_checksum,
+                user_agent: USER_AGENT.to_string(),
+                headers: std::collections::HashMap::new(),
+            },
+            connection: qf_core::config::ConnectionConfig {
+                max_connections_per_host,
+                max_global_connections: 256,
+                keep_alive_timeout_secs: 30,
+                connect_timeout_secs: 10,
+                enable_http2: true,
+                enable_quic,
+            },
+            scheduler: qf_core::config::SchedulerConfig::default(),
+        }
+    }
+
     fn test_state() -> Arc<AppState> {
         Arc::new(AppState {
             tasks: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(Mutex::new(AppConfig {
-                download_dir: "/default".to_string(),
                 max_concurrent_tasks: 5,
-                max_concurrent_fragments: 16,
-                max_connections_per_host: 16,
-                enable_quic: false,
-                verify_checksum: true,
+                download: DownloadConfig {
+                    download_dir: "/default".to_string(),
+                    ..DownloadConfig::default()
+                },
+                connection: ConnectionConfig::default(),
+                scheduler: Default::default(),
             })),
             handles: Arc::new(DashMap::new()),
             active_permits: Arc::new(AtomicU32::new(0)),
             sniffer: Arc::new(Mutex::new(Vec::new())),
             sniffer_filters: Arc::new(Mutex::new(Vec::new())),
             progress_tx: watch::Sender::new(HashMap::new()),
+            connection_pool: Arc::new(ConnectionPool::new(PoolConfig {
+                max_per_host: 16,
+                max_global: 256,
+            })),
         })
     }
 
@@ -1297,31 +1306,44 @@ mod tests {
         let state = test_state();
         let cfg = get_config_inner(&state).await.unwrap();
         assert_eq!(cfg.max_concurrent_tasks, 5);
-        assert_eq!(cfg.max_concurrent_fragments, 16);
-        assert_eq!(cfg.max_connections_per_host, 16);
-        assert!(!cfg.enable_quic);
-        assert!(cfg.verify_checksum);
+        assert_eq!(cfg.download.max_concurrent_fragments, 16);
+        assert_eq!(cfg.connection.max_connections_per_host, 16);
+        assert!(!cfg.connection.enable_quic);
+        assert!(cfg.download.verify_checksum);
     }
 
     #[tokio::test]
     async fn test_update_config_roundtrip() {
         let state = test_state();
         let new_cfg = AppConfig {
-            download_dir: "/data/downloads".to_string(),
             max_concurrent_tasks: 10,
-            max_concurrent_fragments: 32,
-            max_connections_per_host: 8,
-            enable_quic: true,
-            verify_checksum: false,
+            download: qf_core::config::DownloadConfig {
+                download_dir: "/data/downloads".to_string(),
+                max_concurrent_fragments: 32,
+                max_retries: 3,
+                request_timeout_secs: 30,
+                verify_checksum: false,
+                user_agent: USER_AGENT.to_string(),
+                headers: std::collections::HashMap::new(),
+            },
+            connection: qf_core::config::ConnectionConfig {
+                max_connections_per_host: 8,
+                max_global_connections: 256,
+                keep_alive_timeout_secs: 30,
+                connect_timeout_secs: 10,
+                enable_http2: true,
+                enable_quic: true,
+            },
+            scheduler: qf_core::config::SchedulerConfig::default(),
         };
         update_config_inner(&state, new_cfg).await.unwrap();
         let cfg = get_config_inner(&state).await.unwrap();
-        assert_eq!(cfg.download_dir, "/data/downloads");
+        assert_eq!(cfg.download.download_dir, "/data/downloads");
         assert_eq!(cfg.max_concurrent_tasks, 10);
-        assert_eq!(cfg.max_concurrent_fragments, 32);
-        assert_eq!(cfg.max_connections_per_host, 8);
-        assert!(cfg.enable_quic);
-        assert!(!cfg.verify_checksum);
+        assert_eq!(cfg.download.max_concurrent_fragments, 32);
+        assert_eq!(cfg.connection.max_connections_per_host, 8);
+        assert!(cfg.connection.enable_quic);
+        assert!(!cfg.download.verify_checksum);
     }
 
     #[test]
@@ -1534,19 +1556,32 @@ mod tests {
     #[test]
     fn test_app_config_serialization_roundtrip() {
         let cfg = AppConfig {
-            download_dir: "/tmp".to_string(),
             max_concurrent_tasks: 3,
-            max_concurrent_fragments: 8,
-            max_connections_per_host: 4,
-            enable_quic: true,
-            verify_checksum: false,
+            download: qf_core::config::DownloadConfig {
+                download_dir: "/tmp".to_string(),
+                max_concurrent_fragments: 8,
+                max_retries: 3,
+                request_timeout_secs: 30,
+                verify_checksum: false,
+                user_agent: USER_AGENT.to_string(),
+                headers: std::collections::HashMap::new(),
+            },
+            connection: qf_core::config::ConnectionConfig {
+                max_connections_per_host: 4,
+                max_global_connections: 256,
+                keep_alive_timeout_secs: 30,
+                connect_timeout_secs: 10,
+                enable_http2: true,
+                enable_quic: true,
+            },
+            scheduler: qf_core::config::SchedulerConfig::default(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let deserialized: AppConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.download_dir, "/tmp");
+        assert_eq!(deserialized.download.download_dir, "/tmp");
         assert_eq!(deserialized.max_concurrent_tasks, 3);
-        assert!(deserialized.enable_quic);
-        assert!(!deserialized.verify_checksum);
+        assert!(deserialized.connection.enable_quic);
+        assert!(!deserialized.download.verify_checksum);
     }
 
     #[test]
@@ -1648,14 +1683,7 @@ mod tests {
         let state = test_state();
         let result = update_config_inner(
             &state,
-            AppConfig {
-                download_dir: "/tmp".to_string(),
-                max_concurrent_tasks: 0,
-                max_concurrent_fragments: 16,
-                max_connections_per_host: 16,
-                enable_quic: false,
-                verify_checksum: true,
-            },
+            make_test_app_config(0, "/tmp", 16, 16, false, true),
         )
         .await;
         assert!(result.is_err());
@@ -1667,14 +1695,7 @@ mod tests {
         let state = test_state();
         let result = update_config_inner(
             &state,
-            AppConfig {
-                download_dir: "/tmp".to_string(),
-                max_concurrent_tasks: 5,
-                max_concurrent_fragments: 0,
-                max_connections_per_host: 16,
-                enable_quic: false,
-                verify_checksum: true,
-            },
+            make_test_app_config(5, "/tmp", 0, 16, false, true),
         )
         .await;
         assert!(result.is_err());
@@ -1686,14 +1707,7 @@ mod tests {
         let state = test_state();
         let result = update_config_inner(
             &state,
-            AppConfig {
-                download_dir: "/tmp".to_string(),
-                max_concurrent_tasks: 65,
-                max_concurrent_fragments: 16,
-                max_connections_per_host: 16,
-                enable_quic: false,
-                verify_checksum: true,
-            },
+            make_test_app_config(65, "/tmp", 16, 16, false, true),
         )
         .await;
         assert!(result.is_err());
@@ -1705,14 +1719,7 @@ mod tests {
         let state = test_state();
         let result = update_config_inner(
             &state,
-            AppConfig {
-                download_dir: "/tmp".to_string(),
-                max_concurrent_tasks: 5,
-                max_concurrent_fragments: 33,
-                max_connections_per_host: 16,
-                enable_quic: false,
-                verify_checksum: true,
-            },
+            make_test_app_config(5, "/tmp", 33, 16, false, true),
         )
         .await;
         assert!(result.is_err());
@@ -1724,14 +1731,7 @@ mod tests {
         let state = test_state();
         let result = update_config_inner(
             &state,
-            AppConfig {
-                download_dir: String::new(),
-                max_concurrent_tasks: 5,
-                max_concurrent_fragments: 16,
-                max_connections_per_host: 16,
-                enable_quic: false,
-                verify_checksum: true,
-            },
+            make_test_app_config(5, "", 16, 16, false, true),
         )
         .await;
         assert!(result.is_err());
@@ -1743,28 +1743,14 @@ mod tests {
         let state = test_state();
         let result = update_config_inner(
             &state,
-            AppConfig {
-                download_dir: "/tmp".to_string(),
-                max_concurrent_tasks: 1,
-                max_concurrent_fragments: 1,
-                max_connections_per_host: 1,
-                enable_quic: false,
-                verify_checksum: true,
-            },
+            make_test_app_config(1, "/tmp", 1, 1, false, true),
         )
         .await;
         assert!(result.is_ok());
 
         let result = update_config_inner(
             &state,
-            AppConfig {
-                download_dir: "/tmp".to_string(),
-                max_concurrent_tasks: 64,
-                max_concurrent_fragments: 32,
-                max_connections_per_host: 16,
-                enable_quic: false,
-                verify_checksum: true,
-            },
+            make_test_app_config(64, "/tmp", 32, 16, false, true),
         )
         .await;
         assert!(result.is_ok());
@@ -1775,7 +1761,7 @@ mod tests {
         let state = test_state();
         {
             let mut cfg = state.config.lock().await;
-            cfg.max_concurrent_fragments = 0;
+            cfg.download.max_concurrent_fragments = 0;
         }
         let result = create_task_inner(&state, "http://example.com/zero-sem.bin".into(), None).await;
         assert!(
