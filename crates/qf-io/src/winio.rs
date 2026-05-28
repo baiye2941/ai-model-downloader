@@ -7,6 +7,9 @@
 //! - 文件预分配(SetFilePointerEx + SetEndOfFile)
 //!
 //! 仅在 Windows 平台编译。其他平台应使用 tokio_file 模块。
+//!
+//! Windows share_mode:显式设置 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+//! 允许其他进程读写和删除文件,避免 cargo clean 等操作因独占锁失败(os error 5)。
 
 use std::path::{Path, PathBuf};
 
@@ -16,46 +19,37 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::storage::AsyncStorage;
 
-/// Windows 优化的文件句柄
-///
-/// 使用 Windows 特有的文件打开标志来提升大文件 I/O 性能:
-/// - `FILE_FLAG_NO_BUFFERING` (0x20000000): 绕过系统文件缓存,避免双重缓存
-/// - `FILE_FLAG_SEQUENTIAL_SCAN` (0x08000000): 提示内核进行顺序预读
-///
-/// 注意: NO_BUFFERING 模式要求读写必须按扇区对齐(通常 512 字节),
-/// 调用方需确保 buffer 大小和偏移量满足对齐要求。
+#[cfg(target_os = "windows")]
+mod win_flags {
+    pub const FILE_FLAG_NO_BUFFERING: u32 = 0x20000000;
+    pub const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x08000000;
+    pub const FILE_SHARE_READ: u32 = 0x00000001;
+    pub const FILE_SHARE_WRITE: u32 = 0x00000002;
+    pub const FILE_SHARE_DELETE: u32 = 0x00000004;
+}
+
 pub struct WinFile {
     path: PathBuf,
     file: tokio::sync::Mutex<tokio::fs::File>,
-    /// 文件是否以 NO_BUFFERING 模式打开
     no_buffering: bool,
 }
 
-/// Windows 文件标志常量
-#[cfg(target_os = "windows")]
-mod win_flags {
-    /// 绕过系统缓存,直接 I/O。要求对齐读写。
-    pub const FILE_FLAG_NO_BUFFERING: u32 = 0x20000000;
-    /// 提示内核顺序访问,启用预读优化
-    pub const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x08000000;
-}
-
 impl WinFile {
-    /// 使用 Windows 优化标志打开文件
-    ///
-    /// 启用 NO_BUFFERING + SEQUENTIAL_SCAN,适用于下载场景(顺序写大文件)。
     #[cfg(target_os = "windows")]
     pub async fn open_optimized<P: AsRef<Path>>(path: P) -> QfResult<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = OpenOptions::new()
-            .read(true)
+        let mut opts = OpenOptions::new();
+        opts.read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .custom_flags(win_flags::FILE_FLAG_NO_BUFFERING | win_flags::FILE_FLAG_SEQUENTIAL_SCAN)
-            .open(&path)
-            .await
-            .map_err(QfError::Io)?;
+            .share_mode(
+                win_flags::FILE_SHARE_READ
+                    | win_flags::FILE_SHARE_WRITE
+                    | win_flags::FILE_SHARE_DELETE,
+            );
+        let file = opts.open(&path).await.map_err(QfError::Io)?;
         Ok(Self {
             path,
             file: tokio::sync::Mutex::new(file),
@@ -63,19 +57,16 @@ impl WinFile {
         })
     }
 
-    /// 使用标准模式打开文件(不启用 Windows 特有优化)
-    ///
-    /// 适用于不满足对齐要求的场景,或非 Windows 平台上的兼容行为。
     pub async fn open_standard<P: AsRef<Path>>(path: P) -> QfResult<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .await
-            .map_err(QfError::Io)?;
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(target_os = "windows")]
+        {
+            use win_flags::*;
+            opts.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        }
+        let file = opts.open(&path).await.map_err(QfError::Io)?;
         Ok(Self {
             path,
             file: tokio::sync::Mutex::new(file),
@@ -93,14 +84,18 @@ impl WinFile {
         Ok(())
     }
 
-    /// 获取文件路径
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// 是否启用了 NO_BUFFERING 模式
     pub fn is_no_buffering(&self) -> bool {
         self.no_buffering
+    }
+
+    pub async fn close(&self) -> QfResult<()> {
+        let file = self.file.lock().await;
+        file.sync_data().await.map_err(QfError::Io)?;
+        Ok(())
     }
 }
 
@@ -173,6 +168,10 @@ impl AsyncStorage for WinFile {
         let file = self.file.lock().await;
         let metadata = file.metadata().await?;
         Ok(metadata.len())
+    }
+
+    async fn close(&self) -> QfResult<()> {
+        self.close().await
     }
 }
 

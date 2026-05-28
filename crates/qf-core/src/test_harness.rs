@@ -186,6 +186,10 @@ pub mod harness {
             let data = self.data.lock().unwrap();
             Ok(data.len() as u64)
         }
+
+        async fn close(&self) -> QfResult<()> {
+            Ok(())
+        }
     }
 
     /// 创建测试用的文件元数据

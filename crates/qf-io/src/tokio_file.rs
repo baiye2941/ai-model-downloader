@@ -2,6 +2,9 @@
 //!
 //! 使用 `tokio::sync::Mutex` 保护文件句柄,确保异步安全。
 //! 后续可升级为 `pwrite`/`pread` positioned I/O 消除锁竞争。
+//!
+//! Windows 平台:显式设置 `share_mode` 允许其他进程读写和删除文件,
+//! 避免 `cargo clean` 等操作因文件被独占锁定而失败(os error 5)。
 
 use std::path::{Path, PathBuf};
 
@@ -12,9 +15,13 @@ use tokio::sync::Mutex;
 
 use crate::storage::AsyncStorage;
 
-/// 基于 tokio 的异步文件存储
-///
-/// 使用 `tokio::sync::Mutex` 保护文件句柄,支持并发安全的文件 I/O。
+#[cfg(target_os = "windows")]
+mod win_share {
+    pub const FILE_SHARE_READ: u32 = 0x00000001;
+    pub const FILE_SHARE_WRITE: u32 = 0x00000002;
+    pub const FILE_SHARE_DELETE: u32 = 0x00000004;
+}
+
 pub struct TokioFile {
     path: PathBuf,
     file: Mutex<tokio::fs::File>,
@@ -24,14 +31,14 @@ impl TokioFile {
     /// 打开或创建文件
     pub async fn open<P: AsRef<Path>>(path: P) -> QfResult<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .await
-            .map_err(QfError::Io)?;
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(target_os = "windows")]
+        {
+            use win_share::*;
+            opts.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        }
+        let file = opts.open(&path).await.map_err(QfError::Io)?;
         Ok(Self {
             path,
             file: Mutex::new(file),
@@ -41,6 +48,16 @@ impl TokioFile {
     /// 获取文件路径
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 显式关闭文件,释放句柄
+    ///
+    /// Windows 上必须释放句柄后其他进程才能删除/替换文件。
+    /// 调用后不应再执行任何 I/O 操作。
+    pub async fn close(&self) -> QfResult<()> {
+        let file = self.file.lock().await;
+        file.sync_data().await.map_err(QfError::Io)?;
+        Ok(())
     }
 }
 
@@ -75,6 +92,10 @@ impl AsyncStorage for TokioFile {
         let file = self.file.lock().await;
         let metadata = file.metadata().await?;
         Ok(metadata.len())
+    }
+
+    async fn close(&self) -> QfResult<()> {
+        self.close().await
     }
 }
 

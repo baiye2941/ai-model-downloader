@@ -53,30 +53,26 @@ pub trait Protocol: Send + Sync {
     fn download_full(&self, url: &str) -> Pin<Box<dyn Future<Output = QfResult<Bytes>> + Send>>;
 }
 
-/// 存储层 trait:负责数据持久化
 pub trait Storage: Send + Sync {
-    /// 写入数据到指定偏移位置
     fn write_at(
         &self,
         offset: u64,
         data: &[u8],
     ) -> impl std::future::Future<Output = QfResult<usize>> + Send;
 
-    /// 从指定偏移读取数据
     fn read_at(
         &self,
         offset: u64,
         buf: &mut [u8],
     ) -> impl std::future::Future<Output = QfResult<usize>> + Send;
 
-    /// 将数据同步到磁盘
     fn sync(&self) -> impl std::future::Future<Output = QfResult<()>> + Send;
 
-    /// 预分配文件空间
     fn allocate(&self, size: u64) -> impl std::future::Future<Output = QfResult<()>> + Send;
 
-    /// 获取当前文件大小
     fn file_size(&self) -> impl std::future::Future<Output = QfResult<u64>> + Send;
+
+    fn close(&self) -> impl std::future::Future<Output = QfResult<()>> + Send;
 }
 
 /// 校验层 trait:负责数据完整性校验

@@ -438,6 +438,25 @@ impl AsyncStorage for IoUringStorage {
             ))),
         }
     }
+
+    async fn close(&self) -> QfResult<()> {
+        match self.state {
+            IoUringState::Ready => {
+                #[cfg(target_os = "linux")]
+                {
+                    if let Some(ref file) = self.file_fd {
+                        file.sync_all().map_err(QfError::Io)?;
+                    }
+                    Ok(())
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    unreachable!("非 Linux 平台不可能处于 Ready 状态")
+                }
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 // Safety:

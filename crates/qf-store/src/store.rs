@@ -184,8 +184,28 @@ impl Store for FileStore {
     fn delete(&self, key: &str) -> std::io::Result<bool> {
         let path = self.path_for(key);
         if path.exists() {
-            std::fs::remove_file(&path)?;
-            Ok(true)
+            // Windows 上文件可能被其他进程/句柄占用,短暂重试
+            #[cfg(target_os = "windows")]
+            {
+                let mut attempts = 0;
+                loop {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => return Ok(true),
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::PermissionDenied && attempts < 5 =>
+                        {
+                            attempts += 1;
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                std::fs::remove_file(&path)?;
+                Ok(true)
+            }
         } else {
             Ok(false)
         }
