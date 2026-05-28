@@ -7,9 +7,10 @@ use uuid::Uuid;
 pub type TaskId = Uuid;
 
 /// 下载任务状态
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum DownloadState {
     /// 等待中
+    #[default]
     Pending,
     /// 下载中
     Downloading,
@@ -57,6 +58,20 @@ pub struct FragmentInfo {
     pub downloaded: u64,
     /// 分片校验哈希
     pub hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskProgress {
+    pub downloaded: u64,
+    pub speed: u64,
+    pub progress: f64,
+    pub fragments_done: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadStateChange {
+    pub task_id: String,
+    pub new_state: DownloadState,
 }
 
 #[cfg(test)]
