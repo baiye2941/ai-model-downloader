@@ -8,22 +8,30 @@ pub type TaskId = Uuid;
 
 /// 下载任务状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum DownloadState {
-    /// 等待中
     #[default]
     Pending,
-    /// 下载中
     Downloading,
-    /// 已暂停
     Paused,
-    /// 校验中
     Verifying,
-    /// 已完成
     Completed,
-    /// 失败
     Failed,
-    /// 已取消
     Cancelled,
+}
+
+impl std::fmt::Display for DownloadState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DownloadState::Pending => write!(f, "pending"),
+            DownloadState::Downloading => write!(f, "downloading"),
+            DownloadState::Paused => write!(f, "paused"),
+            DownloadState::Verifying => write!(f, "verifying"),
+            DownloadState::Completed => write!(f, "completed"),
+            DownloadState::Failed => write!(f, "failed"),
+            DownloadState::Cancelled => write!(f, "cancelled"),
+        }
+    }
 }
 
 /// 文件元数据
@@ -163,7 +171,7 @@ mod tests {
     fn test_download_state_serialization() {
         let state = DownloadState::Downloading;
         let json = serde_json::to_string(&state).unwrap();
-        assert_eq!(json, "\"Downloading\"");
+        assert_eq!(json, "\"downloading\"");
         let deserialized: DownloadState = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, DownloadState::Downloading);
     }

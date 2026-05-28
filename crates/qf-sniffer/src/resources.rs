@@ -13,16 +13,20 @@ use crate::capture::{CaptureConfig, identify_resource, should_capture};
 
 /// 嗅探到的资源
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SnifferResource {
     /// 唯一标识
     pub id: String,
     /// 资源 URL
     pub url: String,
     /// 文件名
+    #[serde(rename = "name")]
     pub file_name: String,
     /// 资源类型
+    #[serde(rename = "type")]
     pub resource_type: String,
     /// 文件大小(字节,如已知)
+    #[serde(rename = "size")]
     pub file_size: Option<u64>,
     /// Content-Type
     pub content_type: Option<String>,
@@ -93,7 +97,7 @@ impl ResourceManager {
                 id,
                 url: url.to_string(),
                 file_name,
-                resource_type: format!("{resource_type:?}"),
+                resource_type: resource_type.as_str().to_string(),
                 file_size,
                 content_type: content_type.map(|s| s.to_string()),
                 discovered_at: now,
@@ -233,9 +237,9 @@ mod tests {
         rm.on_request("http://example.com/a.mp4", None, Some(10240), None);
         rm.on_request("http://example.com/b.mp3", None, Some(10240), None);
         rm.on_request("http://example.com/c.zip", None, Some(10240), None);
-        let videos = rm.get_by_type("Video");
+        let videos = rm.get_by_type("video");
         assert_eq!(videos.len(), 1);
-        let archives = rm.get_by_type("Archive");
+        let archives = rm.get_by_type("archive");
         assert_eq!(archives.len(), 1);
     }
 

@@ -18,7 +18,7 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
 }
 
 export const api = {
-  createTask: (url: string) => invoke<string>('create_task', { url }),
+  createTask: (url: string, downloadDir?: string) => invoke<string>('create_task', { url, downloadDir }),
   getTaskList: () => invoke<TaskInfo[]>('get_task_list'),
   getTaskDetail: (taskId: string) => invoke<TaskInfo>('get_task_detail', { taskId }),
   pauseTask: (taskId: string) => invoke<void>('pause_task', { taskId }),
@@ -28,5 +28,6 @@ export const api = {
   getConfig: () => invoke<AppConfig>('get_config'),
   updateConfig: (config: Partial<AppConfig>) => invoke<void>('update_config', { config }),
   getSnifferResources: () => invoke<SnifferResource[]>('get_sniffer_resources'),
+  addSnifferFilter: (filter: string) => invoke<void>('add_sniffer_filter', { filter }),
   subscribeProgress: () => invoke<void>('subscribe_progress'),
 }

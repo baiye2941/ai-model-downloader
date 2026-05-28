@@ -60,7 +60,7 @@ async fn any_fragment() {
         file_size: Some(1024),
         downloaded: 0,
         speed: 0,
-        status: "pending".to_string(),
+        status: qf_core::types::DownloadState::Pending,
         progress: 0.0,
         fragments_total: 4,
         fragments_done: 0,
@@ -72,12 +72,12 @@ async fn any_fragment() {
     {
         let mut store = state.tasks.lock().await;
         if let Some(t) = store.get_mut(&task_id) {
-            t.status = "failed".to_string();
+            t.status = qf_core::types::DownloadState::Failed;
         }
     }
     let store = state.tasks.lock().await;
     let t = store.get(&task_id).unwrap();
-    assert_eq!(t.status, "failed", "分片失败应正确标记任务状态");
+    assert_eq!(t.status, qf_core::types::DownloadState::Failed, "分片失败应正确标记任务状态");
 }
 
 /// 验证 max_concurrent 信号量门控
@@ -105,7 +105,7 @@ async fn max_concurrent() {
                     file_size: None,
                     downloaded: 0,
                     speed: 0,
-                    status: "downloading".to_string(),
+                    status: qf_core::types::DownloadState::Downloading,
                     progress: 0.0,
                     fragments_total: 0,
                     fragments_done: 0,
@@ -119,7 +119,7 @@ async fn max_concurrent() {
     let store = state.tasks.lock().await;
     let active = store
         .values()
-        .filter(|t| t.status == "downloading" || t.status == "pending")
+        .filter(|t| t.status == qf_core::types::DownloadState::Downloading || t.status == qf_core::types::DownloadState::Pending)
         .count();
     let max = state.config.lock().await.max_concurrent_tasks as usize;
     assert!(

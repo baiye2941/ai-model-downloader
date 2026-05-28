@@ -1,17 +1,7 @@
-//! 基于 tokio 的异步文件 I/O 实现
-//!
-//! 使用 `tokio::sync::Mutex` 保护文件句柄,确保异步安全。
-//! 后续可升级为 `pwrite`/`pread` positioned I/O 消除锁竞争。
-//!
-//! Windows 平台:显式设置 `share_mode` 允许其他进程读写和删除文件,
-//! 避免 `cargo clean` 等操作因文件被独占锁定而失败(os error 5)。
-
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use qf_core::{QfError, QfResult};
-use tokio::fs::OpenOptions;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::Mutex;
 
 use crate::storage::AsyncStorage;
 
@@ -24,74 +14,156 @@ mod win_share {
 
 pub struct TokioFile {
     path: PathBuf,
-    file: Mutex<tokio::fs::File>,
+    file: Arc<std::fs::File>,
 }
 
 impl TokioFile {
-    /// 打开或创建文件
+    #[cfg(target_os = "windows")]
     pub async fn open<P: AsRef<Path>>(path: P) -> QfResult<Self> {
         let path = path.as_ref().to_path_buf();
-        let mut opts = OpenOptions::new();
-        opts.read(true).write(true).create(true).truncate(false);
-        #[cfg(target_os = "windows")]
-        {
-            use win_share::*;
-            opts.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
-        }
-        let file = opts.open(&path).await.map_err(QfError::Io)?;
+        use std::os::windows::fs::OpenOptionsExt;
+        use win_share::*;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&path)
+            .map_err(QfError::Io)?;
         Ok(Self {
             path,
-            file: Mutex::new(file),
+            file: Arc::new(file),
         })
     }
 
-    /// 获取文件路径
+    #[cfg(not(target_os = "windows"))]
+    pub async fn open<P: AsRef<Path>>(path: P) -> QfResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(QfError::Io)?;
+        Ok(Self {
+            path,
+            file: Arc::new(file),
+        })
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// 显式关闭文件,释放句柄
-    ///
-    /// Windows 上必须释放句柄后其他进程才能删除/替换文件。
-    /// 调用后不应再执行任何 I/O 操作。
     pub async fn close(&self) -> QfResult<()> {
-        let file = self.file.lock().await;
-        file.sync_data().await.map_err(QfError::Io)?;
-        Ok(())
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.sync_data().map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
     }
 }
 
+#[cfg(target_os = "windows")]
 impl AsyncStorage for TokioFile {
     async fn write_at(&self, offset: u64, data: &[u8]) -> QfResult<usize> {
-        let mut file = self.file.lock().await;
-        file.seek(std::io::SeekFrom::Start(offset)).await?;
-        file.write_all(data).await?;
-        Ok(data.len())
+        use std::os::windows::fs::FileExt;
+        let file = self.file.clone();
+        let data = data.to_vec();
+        tokio::task::spawn_blocking(move || file.seek_write(&data, offset).map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
     }
 
     async fn read_at(&self, offset: u64, buf: &mut [u8]) -> QfResult<usize> {
-        let mut file = self.file.lock().await;
-        file.seek(std::io::SeekFrom::Start(offset)).await?;
-        let read = file.read(buf).await?;
-        Ok(read)
+        use std::os::windows::fs::FileExt;
+        let file = self.file.clone();
+        let buf_len = buf.len();
+        let mut owned_buf = vec![0u8; buf_len];
+        let (n, owned_buf) = tokio::task::spawn_blocking(move || {
+            let n = file.seek_read(&mut owned_buf, offset)?;
+            Ok::<_, std::io::Error>((n, owned_buf))
+        })
+        .await
+        .map_err(|e| QfError::Io(e.into()))?
+        .map_err(QfError::Io)?;
+        buf[..n].copy_from_slice(&owned_buf[..n]);
+        Ok(n)
     }
 
     async fn sync(&self) -> QfResult<()> {
-        let file = self.file.lock().await;
-        file.sync_data().await?;
-        Ok(())
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.sync_data().map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
     }
 
     async fn allocate(&self, size: u64) -> QfResult<()> {
-        let file = self.file.lock().await;
-        file.set_len(size).await?;
-        Ok(())
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.set_len(size).map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
     }
 
     async fn file_size(&self) -> QfResult<u64> {
-        let file = self.file.lock().await;
-        let metadata = file.metadata().await?;
-        Ok(metadata.len())
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.metadata().map(|m| m.len()).map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
+    }
+
+    async fn close(&self) -> QfResult<()> {
+        self.close().await
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+impl AsyncStorage for TokioFile {
+    async fn write_at(&self, offset: u64, data: &[u8]) -> QfResult<usize> {
+        use std::os::unix::fs::FileExt;
+        let file = self.file.clone();
+        let data = data.to_vec();
+        tokio::task::spawn_blocking(move || file.write_at(&data, offset).map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
+    }
+
+    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> QfResult<usize> {
+        use std::os::unix::fs::FileExt;
+        let file = self.file.clone();
+        let buf_len = buf.len();
+        let mut owned_buf = vec![0u8; buf_len];
+        let (n, owned_buf) = tokio::task::spawn_blocking(move || {
+            let n = file.read_at(&mut owned_buf, offset)?;
+            Ok::<_, std::io::Error>((n, owned_buf))
+        })
+        .await
+        .map_err(|e| QfError::Io(e.into()))?
+        .map_err(QfError::Io)?;
+        buf[..n].copy_from_slice(&owned_buf[..n]);
+        Ok(n)
+    }
+
+    async fn sync(&self) -> QfResult<()> {
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.sync_data().map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
+    }
+
+    async fn allocate(&self, size: u64) -> QfResult<()> {
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.set_len(size).map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
+    }
+
+    async fn file_size(&self) -> QfResult<u64> {
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.metadata().map(|m| m.len()).map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
     }
 
     async fn close(&self) -> QfResult<()> {
@@ -178,7 +250,6 @@ mod tests {
             h.await.unwrap();
         }
 
-        // 验证每个区域写入正确
         for i in 0u8..16 {
             let offset = (i as u64) * 256;
             let mut buf = [0u8; 256];
@@ -190,7 +261,6 @@ mod tests {
         }
     }
 
-    /// 并发写入正确性:32 个任务同时写入不同偏移区域,全部数据一致
     #[tokio::test]
     async fn test_concurrent_write_at_correctness() {
         let tmp = NamedTempFile::new().unwrap();
@@ -201,12 +271,10 @@ mod tests {
 
         let mut handles = Vec::new();
 
-        // 32 个并发任务,每个写入 256 字节区域
         for i in 0u32..32 {
             let s = storage.clone();
             handles.push(tokio::spawn(async move {
                 let offset = (i as u64) * 256;
-                // 写入可验证的数据模式:每个字节 = (offset + position) % 256
                 let data: Vec<u8> = (0..256u32).map(|j| ((i * 256 + j) % 256) as u8).collect();
                 s.write_at(offset, &data).await.unwrap();
             }));
@@ -216,24 +284,21 @@ mod tests {
             handle.await.unwrap();
         }
 
-        // 验证每个区域的数据完整正确
         for i in 0u32..32 {
             let offset = (i as u64) * 256;
             let mut buf = [0u8; 256];
             let read = storage.read_at(offset, &mut buf).await.unwrap();
             assert_eq!(read, 256);
-            for j in 0..256usize {
+            for (j, &byte) in buf.iter().enumerate() {
                 let expected = ((i * 256 + j as u32) % 256) as u8;
                 assert_eq!(
-                    buf[j], expected,
-                    "区域 {offset} 字节 {j} 不一致:期望 {expected},实际 {}",
-                    buf[j]
+                    byte, expected,
+                    "区域 {offset} 字节 {j} 不一致:期望 {expected},实际 {byte}"
                 );
             }
         }
     }
 
-    /// 并发读写:多个任务同时读写不同区域
     #[tokio::test]
     async fn test_concurrent_read_write_mixed() {
         let tmp = NamedTempFile::new().unwrap();
@@ -241,7 +306,6 @@ mod tests {
         storage.allocate(4096).await.unwrap();
         let storage = std::sync::Arc::new(storage);
 
-        // 先写入初始数据
         for i in 0u8..16 {
             let offset = (i as u64) * 256;
             let data = vec![i; 256];
@@ -250,7 +314,6 @@ mod tests {
 
         let mut handles = Vec::new();
 
-        // 8 个读任务
         for i in 0u8..8 {
             let s = storage.clone();
             handles.push(tokio::spawn(async move {
@@ -262,7 +325,6 @@ mod tests {
             }));
         }
 
-        // 8 个写任务(写入另一半区域)
         for i in 8u8..16 {
             let s = storage.clone();
             handles.push(tokio::spawn(async move {
@@ -276,7 +338,6 @@ mod tests {
             handle.await.unwrap();
         }
 
-        // 验证写入区域的数据已更新
         for i in 8u8..16 {
             let offset = (i as u64) * 256;
             let mut buf = [0u8; 256];

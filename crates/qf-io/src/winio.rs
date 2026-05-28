@@ -1,21 +1,7 @@
-//! Windows I/O 优化
-//!
-//! 利用 Windows 特有的 I/O 特性提升性能:
-//! - FILE_FLAG_NO_BUFFERING: 绕过系统缓存,减少内存拷贝
-//! - FILE_FLAG_SEQUENTIAL_SCAN: 提示内核顺序访问模式
-//! - WriteFile/ReadFile with OVERLAPPED: 异步 I/O
-//! - 文件预分配(SetFilePointerEx + SetEndOfFile)
-//!
-//! 仅在 Windows 平台编译。其他平台应使用 tokio_file 模块。
-//!
-//! Windows share_mode:显式设置 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-//! 允许其他进程读写和删除文件,避免 cargo clean 等操作因独占锁失败(os error 5)。
-
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use qf_core::{QfError, QfResult};
-use tokio::fs::OpenOptions;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::storage::AsyncStorage;
 
@@ -30,58 +16,74 @@ mod win_flags {
 
 pub struct WinFile {
     path: PathBuf,
-    file: tokio::sync::Mutex<tokio::fs::File>,
+    file: Arc<std::fs::File>,
     no_buffering: bool,
 }
 
 impl WinFile {
     #[cfg(target_os = "windows")]
     pub async fn open_optimized<P: AsRef<Path>>(path: P) -> QfResult<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use win_flags::*;
         let path = path.as_ref().to_path_buf();
-        let mut opts = OpenOptions::new();
-        opts.read(true)
+        let file = std::fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .custom_flags(win_flags::FILE_FLAG_NO_BUFFERING | win_flags::FILE_FLAG_SEQUENTIAL_SCAN)
-            .share_mode(
-                win_flags::FILE_SHARE_READ
-                    | win_flags::FILE_SHARE_WRITE
-                    | win_flags::FILE_SHARE_DELETE,
-            );
-        let file = opts.open(&path).await.map_err(QfError::Io)?;
+            .custom_flags(FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&path)
+            .map_err(QfError::Io)?;
         Ok(Self {
             path,
-            file: tokio::sync::Mutex::new(file),
+            file: Arc::new(file),
             no_buffering: true,
         })
     }
 
+    #[cfg(target_os = "windows")]
     pub async fn open_standard<P: AsRef<Path>>(path: P) -> QfResult<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use win_flags::*;
         let path = path.as_ref().to_path_buf();
-        let mut opts = OpenOptions::new();
-        opts.read(true).write(true).create(true).truncate(false);
-        #[cfg(target_os = "windows")]
-        {
-            use win_flags::*;
-            opts.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
-        }
-        let file = opts.open(&path).await.map_err(QfError::Io)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&path)
+            .map_err(QfError::Io)?;
         Ok(Self {
             path,
-            file: tokio::sync::Mutex::new(file),
+            file: Arc::new(file),
             no_buffering: false,
         })
     }
 
-    /// 预分配文件空间(fallocate 等价)
-    ///
-    /// 通过 set_len 预分配磁盘空间,避免写入时频繁扩展文件。
-    /// 对于下载场景,应在开始下载前根据文件大小预分配。
+    #[cfg(not(target_os = "windows"))]
+    pub async fn open_standard<P: AsRef<Path>>(path: P) -> QfResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(QfError::Io)?;
+        Ok(Self {
+            path,
+            file: Arc::new(file),
+            no_buffering: false,
+        })
+    }
+
     pub async fn preallocate(&self, size: u64) -> QfResult<()> {
-        let file = self.file.lock().await;
-        file.set_len(size).await.map_err(QfError::Io)?;
-        Ok(())
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.set_len(size).map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
     }
 
     pub fn path(&self) -> &Path {
@@ -93,17 +95,18 @@ impl WinFile {
     }
 
     pub async fn close(&self) -> QfResult<()> {
-        let file = self.file.lock().await;
-        file.sync_data().await.map_err(QfError::Io)?;
-        Ok(())
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.sync_data().map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
     }
 }
 
+#[cfg(target_os = "windows")]
 impl AsyncStorage for WinFile {
     async fn write_at(&self, offset: u64, data: &[u8]) -> QfResult<usize> {
+        use std::os::windows::fs::FileExt;
         if self.no_buffering {
-            // NO_BUFFERING 模式要求:偏移量和数据长度必须对齐到扇区大小(通常 512 字节)
-            // 检查对齐约束,不满足时返回错误而非静默数据损坏
             const SECTOR_SIZE: u64 = 512;
             if !offset.is_multiple_of(SECTOR_SIZE) {
                 return Err(QfError::Io(std::io::Error::new(
@@ -122,13 +125,15 @@ impl AsyncStorage for WinFile {
             }
         }
 
-        let mut file = self.file.lock().await;
-        file.seek(std::io::SeekFrom::Start(offset)).await?;
-        file.write_all(data).await?;
-        Ok(data.len())
+        let file = self.file.clone();
+        let data = data.to_vec();
+        tokio::task::spawn_blocking(move || file.seek_write(&data, offset).map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
     }
 
     async fn read_at(&self, offset: u64, buf: &mut [u8]) -> QfResult<usize> {
+        use std::os::windows::fs::FileExt;
         if self.no_buffering {
             const SECTOR_SIZE: u64 = 512;
             if !offset.is_multiple_of(SECTOR_SIZE) {
@@ -148,16 +153,25 @@ impl AsyncStorage for WinFile {
             }
         }
 
-        let mut file = self.file.lock().await;
-        file.seek(std::io::SeekFrom::Start(offset)).await?;
-        let read = file.read(buf).await?;
-        Ok(read)
+        let file = self.file.clone();
+        let buf_len = buf.len();
+        let mut owned_buf = vec![0u8; buf_len];
+        let (n, owned_buf) = tokio::task::spawn_blocking(move || {
+            let n = file.seek_read(&mut owned_buf, offset)?;
+            Ok::<_, std::io::Error>((n, owned_buf))
+        })
+        .await
+        .map_err(|e| QfError::Io(e.into()))?
+        .map_err(QfError::Io)?;
+        buf[..n].copy_from_slice(&owned_buf[..n]);
+        Ok(n)
     }
 
     async fn sync(&self) -> QfResult<()> {
-        let file = self.file.lock().await;
-        file.sync_data().await?;
-        Ok(())
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.sync_data().map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
     }
 
     async fn allocate(&self, size: u64) -> QfResult<()> {
@@ -165,9 +179,60 @@ impl AsyncStorage for WinFile {
     }
 
     async fn file_size(&self) -> QfResult<u64> {
-        let file = self.file.lock().await;
-        let metadata = file.metadata().await?;
-        Ok(metadata.len())
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.metadata().map(|m| m.len()).map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
+    }
+
+    async fn close(&self) -> QfResult<()> {
+        self.close().await
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+impl AsyncStorage for WinFile {
+    async fn write_at(&self, offset: u64, data: &[u8]) -> QfResult<usize> {
+        use std::os::unix::fs::FileExt;
+        let file = self.file.clone();
+        let data = data.to_vec();
+        tokio::task::spawn_blocking(move || file.write_at(&data, offset).map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
+    }
+
+    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> QfResult<usize> {
+        use std::os::unix::fs::FileExt;
+        let file = self.file.clone();
+        let buf_len = buf.len();
+        let mut owned_buf = vec![0u8; buf_len];
+        let (n, owned_buf) = tokio::task::spawn_blocking(move || {
+            let n = file.read_at(&mut owned_buf, offset)?;
+            Ok::<_, std::io::Error>((n, owned_buf))
+        })
+        .await
+        .map_err(|e| QfError::Io(e.into()))?
+        .map_err(QfError::Io)?;
+        buf[..n].copy_from_slice(&owned_buf[..n]);
+        Ok(n)
+    }
+
+    async fn sync(&self) -> QfResult<()> {
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.sync_data().map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
+    }
+
+    async fn allocate(&self, size: u64) -> QfResult<()> {
+        self.preallocate(size).await
+    }
+
+    async fn file_size(&self) -> QfResult<u64> {
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || file.metadata().map(|m| m.len()).map_err(QfError::Io))
+            .await
+            .map_err(|e| QfError::Io(e.into()))?
     }
 
     async fn close(&self) -> QfResult<()> {
@@ -251,8 +316,6 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         let file = WinFile::open_optimized(tmp.path()).await.unwrap();
         assert!(file.is_no_buffering());
-        // NO_BUFFERING 模式下写入需要扇区对齐,这里用标准 write 测试标志设置
-        // 实际场景中需要确保对齐
     }
 
     #[cfg(target_os = "windows")]
@@ -264,22 +327,18 @@ mod tests {
         assert_eq!(file.file_size().await.unwrap(), 4096);
     }
 
-    /// 验证 WinFile NO_BUFFERING 模式对齐写入:非对齐偏移/长度应返回错误
     #[tokio::test]
     async fn test_winfile_align() {
         let tmp = NamedTempFile::new().unwrap();
         let file = WinFile::open_standard(tmp.path()).await.unwrap();
-        // 标准模式下非对齐写入应该成功
         assert!(file.write_at(0, b"hello").await.is_ok());
 
-        // 验证 WinFile 内部的对齐逻辑:对齐到 512 字节边界
         let offset: u64 = 100;
         let sector_size: u64 = 512;
         assert!(!offset.is_multiple_of(sector_size), "100 不应是 512 的倍数");
         assert!(sector_size.is_multiple_of(sector_size));
         assert!((sector_size * 2).is_multiple_of(sector_size));
 
-        // 验证对齐 helper 逻辑
         let data_len = 256u64;
         assert!(
             !data_len.is_multiple_of(sector_size),

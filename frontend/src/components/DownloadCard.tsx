@@ -24,9 +24,9 @@ export default function DownloadCard(props: DownloadCardProps) {
       <div class="card-header">
         <div class="card-name">
           <span style={{ overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap' as const }}>
-            {props.task.file_name}
+            {props.task.fileName}
           </span>
-          <span class="ext">{guessExt(props.task.file_name)}</span>
+          <span class="ext">{guessExt(props.task.fileName)}</span>
         </div>
         <span class={`card-status status-${props.task.status}`}>
           {statusText(props.task.status)}
@@ -39,7 +39,7 @@ export default function DownloadCard(props: DownloadCardProps) {
         <span class="detail-item mono">{props.task.progress.toFixed(1)}%</span>
         <span class="detail-item">
           <span class="detail-label">大小</span>
-          <span class="mono">{formatSize(props.task.file_size)}</span>
+          <span class="mono">{formatSize(props.task.fileSize)}</span>
         </span>
         <Show when={props.task.speed > 0}>
           <span class="detail-item">
@@ -49,7 +49,7 @@ export default function DownloadCard(props: DownloadCardProps) {
         </Show>
         <span class="detail-item">
           <span class="detail-label">分片</span>
-          <span class="mono">{props.task.fragments_done}/{props.task.fragments_total}</span>
+          <span class="mono">{props.task.fragmentsDone}/{props.task.fragmentsTotal}</span>
         </span>
       </div>
 

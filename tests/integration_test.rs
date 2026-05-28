@@ -575,7 +575,7 @@ async fn integration_sniffer_resource_lifecycle() {
     assert!(all[0].discovered_at >= all[1].discovered_at);
 
     // 按类型过滤
-    let videos = rm.get_by_type("Video");
+    let videos = rm.get_by_type("video");
     assert_eq!(videos.len(), 1);
     assert!(videos[0].url.contains("video.mp4"));
 

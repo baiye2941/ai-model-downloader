@@ -67,6 +67,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # 并发
 crossbeam-queue = "0.3"
+dashmap = "6"
 
 # 网络
 url = "2"

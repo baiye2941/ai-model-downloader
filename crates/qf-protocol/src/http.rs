@@ -25,7 +25,7 @@ impl HttpClient {
     /// 创建新的 HTTP 客户端
     pub fn new() -> QfResult<Self> {
         let client = Client::builder()
-            .user_agent(format!("QuantumFetch/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(qf_core::config::USER_AGENT)
             .pool_max_idle_per_host(16)
             .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()

@@ -346,6 +346,11 @@ impl DownloadTask {
 
     /// 并发分片下载
     async fn execute_fragmented_download(&mut self) -> QfResult<()> {
+        if self.config.max_concurrent_fragments == 0 {
+            return Err(QfError::Config(
+                "max_concurrent_fragments 不能为 0".to_string(),
+            ));
+        }
         let semaphore = Arc::new(Semaphore::new(
             self.config.max_concurrent_fragments as usize,
         ));

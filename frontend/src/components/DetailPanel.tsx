@@ -18,7 +18,7 @@ export default function DetailPanel() {
     <Show when={selectedTask()} keyed>
       {(task) => (
         <div class="detail-panel" style={{ display: 'block' }}>
-          <div class="panel-title">{task.file_name}</div>
+          <div class="panel-title">{task.fileName}</div>
 
           <div class="panel-row">
             <span class="panel-label">状态</span>
@@ -26,7 +26,7 @@ export default function DetailPanel() {
           </div>
           <div class="panel-row">
             <span class="panel-label">大小</span>
-            <span class="panel-value mono">{formatSize(task.file_size)}</span>
+            <span class="panel-value mono">{formatSize(task.fileSize)}</span>
           </div>
           <div class="panel-row">
             <span class="panel-label">已下载</span>
@@ -44,15 +44,15 @@ export default function DetailPanel() {
           </Show>
           <div class="panel-row">
             <span class="panel-label">分片</span>
-            <span class="panel-value mono">{task.fragments_done} / {task.fragments_total}</span>
+            <span class="panel-value mono">{task.fragmentsDone} / {task.fragmentsTotal}</span>
           </div>
           <div class="panel-row">
             <span class="panel-label">协议</span>
             <span class="panel-value mono">{new URL(task.url).protocol.replace(':', '').toUpperCase()}</span>
           </div>
 
-          <Show when={task.fragments_total > 0}>
-            <FragmentGrid total={task.fragments_total} done={task.fragments_done} status={task.status} />
+          <Show when={task.fragmentsTotal > 0}>
+            <FragmentGrid total={task.fragmentsTotal} done={task.fragmentsDone} status={task.status} />
           </Show>
         </div>
       )}

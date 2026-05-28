@@ -16,6 +16,21 @@ pub enum ResourceType {
     Other,
 }
 
+impl ResourceType {
+    /// 转为小写字符串表示,用于 JSON 序列化
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResourceType::Video => "video",
+            ResourceType::Audio => "audio",
+            ResourceType::Document => "document",
+            ResourceType::Archive => "archive",
+            ResourceType::Executable => "executable",
+            ResourceType::Image => "image",
+            ResourceType::Other => "other",
+        }
+    }
+}
+
 /// 捕获规则配置
 pub struct CaptureConfig {
     /// 启用的资源类型

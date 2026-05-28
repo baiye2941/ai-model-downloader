@@ -368,7 +368,7 @@ fn recv_streaming(recv: quinn::RecvStream) -> ByteStream {
                         header_buf.extend_from_slice(&chunk.bytes);
 
                         // 在累积缓冲区中搜索分隔符
-                        if let Some(pos) = find_subsequence(&header_buf, b"\r\n\r\n") {
+                        if let Some(pos) = find_subsequence(header_buf, b"\r\n\r\n") {
                             let body_start = pos + 4;
 
                             // 验证 HTTP 状态码

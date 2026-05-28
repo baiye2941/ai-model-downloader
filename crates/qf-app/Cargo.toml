@@ -31,4 +31,5 @@ uuid.workspace = true
 chrono.workspace = true
 url.workspace = true
 reqwest.workspace = true
+dashmap.workspace = true
 

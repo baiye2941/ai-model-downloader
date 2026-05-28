@@ -6,9 +6,9 @@ use qf_core::error::QfResult;
 use qf_core::traits::Verifier;
 
 /// 哈希算法类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum HashAlgorithm {
-    /// Blake3 哈希(推荐,速度极快)
+    #[default]
     Blake3,
     /// SHA-256 哈希
     Sha256,

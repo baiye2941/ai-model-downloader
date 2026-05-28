@@ -31,6 +31,17 @@ impl PeerScore {
     }
 }
 
+impl PartialEq for PeerScore {
+    fn eq(&self, other: &Self) -> bool {
+        self.latency_ms == other.latency_ms
+            && self.bandwidth_bps == other.bandwidth_bps
+            && (self.stability - other.stability).abs() < 1e-10
+            && self.distance == other.distance
+    }
+}
+
+impl Eq for PeerScore {}
+
 impl Default for PeerScore {
     fn default() -> Self {
         Self {
@@ -43,13 +54,10 @@ impl Default for PeerScore {
 }
 
 /// Peer 信息
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Default)]
 pub struct PeerInfo {
-    /// Peer 地址
     pub addr: String,
-    /// 评分
     pub score: PeerScore,
-    /// 是否可用
     pub available: bool,
 }
 
