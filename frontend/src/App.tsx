@@ -1,4 +1,4 @@
-import { createSignal, onMount } from 'solid-js'
+import { createSignal, onMount, createEffect } from 'solid-js'
 import type { ViewName } from './types'
 import { api } from './api/invoke'
 import { $tasks } from './stores/downloads'
@@ -26,7 +26,15 @@ export default function App() {
   onMount(() => {
     refreshTaskList()
     api.subscribeProgress().catch(() => {})
-    setInterval(refreshTaskList, 30000)
+  })
+
+  createEffect(() => {
+    const tasks = $tasks.get()
+    const terminalStates = ['completed', 'failed', 'cancelled']
+    const hasTerminal = tasks.some(t => terminalStates.includes(t.status))
+    if (hasTerminal) {
+      refreshTaskList()
+    }
   })
 
   return (

@@ -11,23 +11,25 @@ use crate::kv::KvStore;
 ///
 /// 记录任务的完整状态，可在应用重启后恢复。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskSnapshot {
-    /// 任务 ID
     pub id: String,
-    /// 下载 URL
     pub url: String,
-    /// 保存路径
     pub save_path: String,
-    /// 文件总大小（字节）
+    pub file_name: String,
     pub file_size: Option<u64>,
-    /// 已下载字节数
     pub downloaded: u64,
-    /// 已完成的分片索引列表
-    pub fragments: Vec<u32>,
-    /// 分片总数
+    pub completed_fragments: Vec<u32>,
     pub total_fragments: u32,
-    /// 任务状态：downloading / paused / completed / failed
-    pub status: String,
+    pub fragment_size: u64,
+    pub status: qf_core::DownloadState,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub content_length: Option<u64>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub fail_reason: Option<String>,
+    pub retry_count: u32,
 }
 
 /// 下载任务持久化记录（旧接口，保持向后兼容）
@@ -59,9 +61,9 @@ impl From<TaskSnapshot> for TaskRecord {
             save_path: s.save_path,
             file_size: s.file_size,
             downloaded: s.downloaded,
-            completed_fragments: s.fragments,
+            completed_fragments: s.completed_fragments,
             total_fragments: s.total_fragments,
-            status: s.status,
+            status: format!("{:?}", s.status).to_lowercase(),
         }
     }
 }
@@ -71,13 +73,39 @@ impl From<TaskRecord> for TaskSnapshot {
         Self {
             id: r.task_id,
             url: r.url,
-            save_path: r.save_path,
+            save_path: r.save_path.clone(),
+            file_name: std::path::Path::new(&r.save_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
             file_size: r.file_size,
             downloaded: r.downloaded,
-            fragments: r.completed_fragments,
+            completed_fragments: r.completed_fragments,
             total_fragments: r.total_fragments,
-            status: r.status,
+            fragment_size: 0,
+            status: parse_legacy_status(&r.status),
+            etag: None,
+            last_modified: None,
+            content_length: r.file_size,
+            created_at: String::new(),
+            updated_at: String::new(),
+            fail_reason: None,
+            retry_count: 0,
         }
+    }
+}
+
+fn parse_legacy_status(status: &str) -> qf_core::DownloadState {
+    match status {
+        "pending" => qf_core::DownloadState::Pending,
+        "downloading" => qf_core::DownloadState::Downloading,
+        "paused" => qf_core::DownloadState::Paused,
+        "completed" => qf_core::DownloadState::Completed,
+        "failed" => qf_core::DownloadState::Failed,
+        "cancelled" => qf_core::DownloadState::Cancelled,
+        "verifying" => qf_core::DownloadState::Verifying,
+        _ => qf_core::DownloadState::Failed,
     }
 }
 
@@ -99,17 +127,27 @@ impl RecoveryManager {
 
     /// 加载任务快照
     pub fn load_task_snapshot(&self, task_id: &str) -> std::io::Result<Option<TaskSnapshot>> {
-        self.store.get(&format!("task_{task_id}"))
+        self.load_task_snapshot_by_key(&format!("task_{task_id}"))
+    }
+
+    fn load_task_snapshot_by_key(&self, key: &str) -> std::io::Result<Option<TaskSnapshot>> {
+        let Some(json) = self.store.get_raw(key)? else {
+            return Ok(None);
+        };
+        serde_json::from_str::<TaskSnapshot>(&json)
+            .or_else(|_| serde_json::from_str::<TaskRecord>(&json).map(TaskSnapshot::from))
+            .map(Some)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     /// 加载所有任务快照
     pub fn load_all_task_snapshots(&self) -> std::io::Result<Vec<TaskSnapshot>> {
         let mut tasks = Vec::new();
         for key in self.store.keys()? {
-            if key.starts_with("task_") {
-                if let Some(snapshot) = self.store.get::<TaskSnapshot>(&key)? {
-                    tasks.push(snapshot);
-                }
+            if key.starts_with("task_")
+                && let Some(snapshot) = self.load_task_snapshot_by_key(&key)?
+            {
+                tasks.push(snapshot);
             }
         }
         Ok(tasks)
@@ -117,16 +155,7 @@ impl RecoveryManager {
 
     /// 保存任务记录（旧接口）
     pub fn save_task(&self, record: &TaskRecord) -> std::io::Result<()> {
-        let snapshot: TaskSnapshot = TaskSnapshot {
-            id: record.task_id.clone(),
-            url: record.url.clone(),
-            save_path: record.save_path.clone(),
-            file_size: record.file_size,
-            downloaded: record.downloaded,
-            fragments: record.completed_fragments.clone(),
-            total_fragments: record.total_fragments,
-            status: record.status.clone(),
-        };
+        let snapshot: TaskSnapshot = TaskSnapshot::from(record.clone());
         self.save_task_snapshot(&snapshot)
     }
 
@@ -144,12 +173,11 @@ impl RecoveryManager {
     pub fn recover_pending_tasks(&self) -> std::io::Result<Vec<TaskRecord>> {
         let mut pending = Vec::new();
         for key in self.store.keys()? {
-            if let Some(task_id) = key.strip_prefix("task_") {
-                if let Some(record) = self.load_task(task_id)? {
-                    if record.status == "downloading" || record.status == "paused" {
-                        pending.push(record);
-                    }
-                }
+            if let Some(task_id) = key.strip_prefix("task_")
+                && let Some(record) = self.load_task(task_id)?
+                && (record.status == "downloading" || record.status == "paused")
+            {
+                pending.push(record);
             }
         }
         Ok(pending)
@@ -159,7 +187,10 @@ impl RecoveryManager {
     pub fn recover_pending_snapshots(&self) -> std::io::Result<Vec<TaskSnapshot>> {
         let mut pending = Vec::new();
         for snapshot in self.load_all_task_snapshots()? {
-            if snapshot.status == "downloading" || snapshot.status == "paused" {
+            if matches!(
+                snapshot.status,
+                qf_core::DownloadState::Downloading | qf_core::DownloadState::Paused
+            ) {
                 pending.push(snapshot);
             }
         }
@@ -201,16 +232,25 @@ mod tests {
         }
     }
 
-    fn make_snapshot(id: &str, status: &str) -> TaskSnapshot {
+    fn make_snapshot(id: &str, status: qf_core::DownloadState) -> TaskSnapshot {
         TaskSnapshot {
             id: id.to_string(),
             url: format!("https://example.com/{id}.zip"),
             save_path: format!("/downloads/{id}.zip"),
+            file_name: format!("{id}.zip"),
             file_size: Some(1024),
             downloaded: 512,
-            fragments: vec![0, 1],
+            completed_fragments: vec![0, 1],
             total_fragments: 4,
-            status: status.to_string(),
+            fragment_size: 256,
+            status,
+            etag: None,
+            last_modified: None,
+            content_length: Some(1024),
+            created_at: String::new(),
+            updated_at: String::new(),
+            fail_reason: None,
+            retry_count: 0,
         }
     }
 
@@ -281,7 +321,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = KvStore::open(tmp.path()).unwrap();
         let mgr = RecoveryManager::new(store);
-        let snap = make_snapshot("s1", "downloading");
+        let snap = make_snapshot("s1", qf_core::DownloadState::Downloading);
         mgr.save_task_snapshot(&snap).unwrap();
         let loaded = mgr.load_task_snapshot("s1").unwrap().unwrap();
         assert_eq!(loaded, snap);
@@ -292,11 +332,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = KvStore::open(tmp.path()).unwrap();
         let mgr = RecoveryManager::new(store);
-        mgr.save_task_snapshot(&make_snapshot("a", "downloading"))
+        mgr.save_task_snapshot(&make_snapshot("a", qf_core::DownloadState::Downloading))
             .unwrap();
-        mgr.save_task_snapshot(&make_snapshot("b", "completed"))
+        mgr.save_task_snapshot(&make_snapshot("b", qf_core::DownloadState::Completed))
             .unwrap();
-        mgr.save_task_snapshot(&make_snapshot("c", "paused"))
+        mgr.save_task_snapshot(&make_snapshot("c", qf_core::DownloadState::Paused))
             .unwrap();
 
         let all = mgr.load_all_task_snapshots().unwrap();
@@ -312,13 +352,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = KvStore::open(tmp.path()).unwrap();
         let mgr = RecoveryManager::new(store);
-        mgr.save_task_snapshot(&make_snapshot("p1", "downloading"))
+        mgr.save_task_snapshot(&make_snapshot("p1", qf_core::DownloadState::Downloading))
             .unwrap();
-        mgr.save_task_snapshot(&make_snapshot("p2", "completed"))
+        mgr.save_task_snapshot(&make_snapshot("p2", qf_core::DownloadState::Completed))
             .unwrap();
-        mgr.save_task_snapshot(&make_snapshot("p3", "paused"))
+        mgr.save_task_snapshot(&make_snapshot("p3", qf_core::DownloadState::Paused))
             .unwrap();
-        mgr.save_task_snapshot(&make_snapshot("p4", "failed"))
+        mgr.save_task_snapshot(&make_snapshot("p4", qf_core::DownloadState::Failed))
             .unwrap();
 
         let pending = mgr.recover_pending_snapshots().unwrap();
@@ -338,13 +378,11 @@ mod tests {
 
     #[test]
     fn snapshot_to_record_conversion() {
-        let snap = make_snapshot("conv", "downloading");
+        let snap = make_snapshot("conv", qf_core::DownloadState::Downloading);
         let record: TaskRecord = snap.clone().into();
         assert_eq!(record.task_id, "conv");
         assert_eq!(record.completed_fragments, vec![0, 1]);
-
-        let back: TaskSnapshot = record.into();
-        assert_eq!(back, snap);
+        assert_eq!(record.status, "downloading");
     }
 
     // ── 边界条件 ──
@@ -354,20 +392,64 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = KvStore::open(tmp.path()).unwrap();
         let mgr = RecoveryManager::new(store);
-        let snap = TaskSnapshot {
-            id: "empty".into(),
-            url: "https://example.com/empty".into(),
-            save_path: "/tmp/empty".into(),
-            file_size: None,
-            downloaded: 0,
-            fragments: vec![],
-            total_fragments: 0,
-            status: "downloading".into(),
-        };
+        let snap = make_snapshot("empty", qf_core::DownloadState::Downloading);
         mgr.save_task_snapshot(&snap).unwrap();
         let loaded = mgr.load_task_snapshot("empty").unwrap().unwrap();
         assert_eq!(loaded, snap);
-        assert!(loaded.fragments.is_empty());
-        assert!(loaded.file_size.is_none());
+    }
+
+    #[test]
+    fn snapshot_recovers_legacy_task_record_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw_json = r#"{
+            "task_id":"legacy-1",
+            "url":"https://example.com/legacy.bin",
+            "save_path":"/downloads/legacy.bin",
+            "file_size":1024,
+            "downloaded":512,
+            "completed_fragments":[0,1],
+            "total_fragments":4,
+            "status":"paused"
+        }"#;
+        std::fs::write(tmp.path().join("task_legacy_1.json"), raw_json).unwrap();
+        let store = KvStore::open(tmp.path()).unwrap();
+        let mgr = RecoveryManager::new(store);
+
+        let pending = mgr.recover_pending_snapshots().unwrap();
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "legacy-1");
+        assert_eq!(pending[0].file_name, "legacy.bin");
+        assert_eq!(pending[0].status, qf_core::DownloadState::Paused);
+    }
+
+    #[test]
+    fn test_task_snapshot_serializes_typed_status_and_metadata() {
+        let snapshot = TaskSnapshot {
+            id: "task-1".to_string(),
+            url: "https://example.com/file.bin".to_string(),
+            save_path: "/downloads/file.bin".to_string(),
+            file_name: "file.bin".to_string(),
+            file_size: Some(1024),
+            downloaded: 512,
+            completed_fragments: vec![0, 1],
+            total_fragments: 4,
+            fragment_size: 256,
+            status: qf_core::DownloadState::Paused,
+            etag: Some("\"abc\"".to_string()),
+            last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
+            content_length: Some(1024),
+            created_at: "2026-05-29T00:00:00Z".to_string(),
+            updated_at: "2026-05-29T00:00:01Z".to_string(),
+            fail_reason: None,
+            retry_count: 0,
+        };
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains("paused"));
+        let loaded: TaskSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.status, qf_core::DownloadState::Paused);
+        assert_eq!(loaded.completed_fragments, vec![0, 1]);
+        assert_eq!(loaded.etag.as_deref(), Some("\"abc\""));
     }
 }

@@ -13,6 +13,7 @@ pub mod filename;
 pub mod test_harness;
 pub mod traits;
 pub mod types;
+pub mod url_safety;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,6 +30,7 @@ pub use traits::{ByteStream, Protocol, Storage, Verifier};
 pub use types::{
     DownloadState, DownloadStateChange, FileMetadata, FragmentInfo, TaskId, TaskProgress,
 };
+pub use url_safety::{redact_url_for_log, reject_forbidden_ip, validate_public_http_url};
 
 /// 下载性能指标计数器
 ///
@@ -183,6 +185,8 @@ fn app_config() {
         verify_checksum: false,
         user_agent: "QuantumFetch/Test".to_string(),
         headers: std::collections::HashMap::new(),
+        pause_timeout_secs: 300,
+        authorized_dirs: vec!["/tmp/test".to_string()],
     };
     assert_eq!(cfg.download_dir, "/tmp/test");
     assert_eq!(cfg.max_concurrent_fragments, 8);

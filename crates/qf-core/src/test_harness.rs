@@ -242,6 +242,8 @@ pub mod harness {
             verify_checksum: false,
             user_agent: "QuantumFetch-Test/0.1.0".into(),
             headers: HashMap::new(),
+            pause_timeout_secs: 300,
+            authorized_dirs: vec![std::env::temp_dir().to_string_lossy().to_string()],
         }
     }
 

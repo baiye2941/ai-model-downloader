@@ -21,6 +21,7 @@ qf-core = { path = "../qf-core" }
 qf-engine = { path = "../qf-engine" }
 qf-scheduler = { path = "../qf-scheduler" }
 qf-sniffer = { path = "../qf-sniffer" }
+qf-store = { path = "../qf-store" }
 tauri.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -32,4 +33,7 @@ chrono.workspace = true
 url.workspace = true
 reqwest.workspace = true
 dashmap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 

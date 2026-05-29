@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Local;
 use dashmap::DashMap;
-use qf_core::config::{AppConfig, ConnectionConfig, DownloadConfig, USER_AGENT};
+use qf_core::config::{AppConfig, ConnectionConfig, DownloadConfig};
 use qf_core::filename::extract_filename_from_url;
 use qf_core::types::DownloadState;
 use qf_engine::DownloadTask;
@@ -27,48 +27,18 @@ pub enum AppError {
     Network(String),
     #[error("配置错误: {0}")]
     Config(String),
+    #[error("不支持的协议: {0}")]
+    UnsupportedProtocol(String),
 }
 
 fn validate_download_url(url_str: &str) -> Result<(), AppError> {
     let url = Url::parse(url_str).map_err(|e| AppError::Network(format!("URL 格式无效: {e}")))?;
+    qf_core::validate_public_http_url(&url).map_err(|e| AppError::Network(e.to_string()))?;
 
-    match url.scheme() {
-        "http" | "https" => {}
-        scheme => {
-            return Err(AppError::Network(format!(
-                "不支持的协议: {scheme}，仅允许 http/https"
-            )));
-        }
-    }
-
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(AppError::Network("URL 中不允许包含用户名或密码".into()));
-    }
-
-    if let Some(host) = url.host_str() {
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            if ip.is_loopback() {
-                return Err(AppError::Network("不允许访问环回地址".into()));
-            }
-            if ip.is_unspecified() {
-                return Err(AppError::Network("不允许访问未指定地址".into()));
-            }
-            match ip {
-                std::net::IpAddr::V4(v4) => {
-                    if v4.is_private() || v4.is_link_local() {
-                        return Err(AppError::Network("不允许访问内网地址".into()));
-                    }
-                }
-                std::net::IpAddr::V6(v6) => {
-                    if v6.is_loopback() || v6.is_unspecified() {
-                        return Err(AppError::Network("不允许访问 IPv6 环回/未指定地址".into()));
-                    }
-                }
-            }
-        }
-        if host == "localhost" {
-            return Err(AppError::Network("不允许访问 localhost".into()));
-        }
+    let scheme = url.scheme().to_uppercase();
+    let supported = supported_protocols();
+    if !supported.iter().any(|p| *p == scheme) {
+        return Err(AppError::UnsupportedProtocol(scheme));
     }
 
     Ok(())
@@ -118,6 +88,8 @@ pub type ProgressEvent = HashMap<String, TaskProgress>;
 
 use qf_sniffer::SnifferResource;
 
+use crate::task_store::TaskStore;
+
 pub struct AppState {
     pub tasks: Arc<Mutex<HashMap<String, TaskInfo>>>,
     pub config: Arc<Mutex<AppConfig>>,
@@ -128,6 +100,7 @@ pub struct AppState {
     pub progress_tx: watch::Sender<ProgressEvent>,
     pub connection_pool: Arc<ConnectionPool>,
     pub controls: Arc<DashMap<String, watch::Sender<DownloadState>>>,
+    pub task_store: Arc<TaskStore>,
 }
 
 impl Default for AppState {
@@ -145,6 +118,11 @@ impl AppState {
             scheduler: Default::default(),
         };
         let connection_pool = ConnectionPool::new(PoolConfig::from(config.connection.clone()));
+        let store_dir = qf_core::config::dirs()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".quantumfetch")
+            .join("store");
+        let task_store = Arc::new(TaskStore::open(&store_dir).expect("任务存储初始化失败"));
         Self {
             tasks: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(Mutex::new(config)),
@@ -155,7 +133,18 @@ impl AppState {
             progress_tx: watch::Sender::new(HashMap::new()),
             connection_pool: Arc::new(connection_pool),
             controls: Arc::new(DashMap::new()),
+            task_store,
         }
+    }
+
+    pub async fn load_recovered_tasks(&self) -> Result<(), AppError> {
+        let snapshots = self.task_store.load_recoverable()?;
+        let mut store = self.tasks.lock().await;
+        for snapshot in snapshots {
+            let task = crate::task_store::snapshot_to_task_info(&snapshot);
+            store.insert(task.id.clone(), task);
+        }
+        Ok(())
     }
 }
 
@@ -182,6 +171,27 @@ fn validate_config(config: &AppConfig) -> Result<(), AppError> {
         return Err(AppError::Config("download_dir 不能为空".to_string()));
     }
     Ok(())
+}
+
+fn authorize_download_dir(config: &AppConfig, requested_dir: &str) -> Result<String, AppError> {
+    let requested = std::path::Path::new(requested_dir);
+    let requested_canonical = requested
+        .canonicalize()
+        .unwrap_or_else(|_| requested.to_path_buf());
+
+    let authorized = config.download.authorized_dirs.iter().any(|dir| {
+        let path = std::path::Path::new(dir);
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        requested_canonical == canonical
+    });
+
+    if !authorized {
+        return Err(AppError::Config(format!(
+            "下载目录未授权: {}",
+            requested.display()
+        )));
+    }
+    Ok(requested_dir.to_string())
 }
 
 fn resource_type_to_string(rt: ResourceType) -> &'static str {
@@ -217,6 +227,38 @@ fn cleanup_runtime(state: &AppState, task_id: &str) {
     state.handles.remove(task_id);
 }
 
+async fn persist_task_snapshot(state: &AppState, task_id: &str, fail_reason: Option<String>) {
+    let task = {
+        let store = state.tasks.lock().await;
+        store.get(task_id).cloned()
+    };
+    if let Some(task) = task {
+        let existing = state.task_store.load_snapshot(task_id).ok().flatten();
+        let save_path = if let Some(snapshot) = existing.as_ref() {
+            snapshot.save_path.clone()
+        } else {
+            let download_dir = state.config.lock().await.download.download_dir.clone();
+            std::path::Path::new(&download_dir)
+                .join(&task.file_name)
+                .to_string_lossy()
+                .to_string()
+        };
+        let mut snapshot =
+            crate::task_store::task_info_to_snapshot(&task, save_path, 0, vec![], None, None);
+        if let Some(existing) = existing {
+            snapshot.fragment_size = existing.fragment_size;
+            snapshot.completed_fragments = existing.completed_fragments;
+            snapshot.etag = existing.etag;
+            snapshot.last_modified = existing.last_modified;
+            snapshot.retry_count = existing.retry_count;
+        }
+        snapshot.fail_reason = fail_reason;
+        if let Err(e) = state.task_store.save_snapshot(&snapshot) {
+            tracing::warn!(task_id = %task_id, error = %e, "保存任务状态快照失败");
+        }
+    }
+}
+
 async fn wait_for_cancel_signal(
     control_rx: &mut watch::Receiver<DownloadState>,
 ) -> Result<(), qf_core::QfError> {
@@ -234,15 +276,9 @@ async fn wait_for_cancel_signal(
 }
 
 fn build_download_config(app_config: &AppConfig, download_dir: &str) -> DownloadConfig {
-    DownloadConfig {
-        download_dir: download_dir.to_string(),
-        max_concurrent_fragments: app_config.download.max_concurrent_fragments,
-        max_retries: 3,
-        request_timeout_secs: 30,
-        verify_checksum: app_config.download.verify_checksum,
-        user_agent: USER_AGENT.to_string(),
-        headers: std::collections::HashMap::new(),
-    }
+    let mut download = app_config.download.clone();
+    download.download_dir = download_dir.to_string();
+    download
 }
 
 async fn task_fn(
@@ -347,8 +383,30 @@ async fn task_fn(
                     task.file_size = meta.file_size;
                 }
             }
+
+            let snapshot_task = {
+                let store = state.tasks.lock().await;
+                store.get(&task_id).cloned()
+            };
+            if let Some(task) = snapshot_task {
+                let save_path = std::path::Path::new(&download_dir)
+                    .join(&meta.file_name)
+                    .to_string_lossy()
+                    .to_string();
+                let snapshot = crate::task_store::task_info_to_snapshot(
+                    &task,
+                    save_path,
+                    0,
+                    vec![],
+                    meta.etag.clone(),
+                    meta.last_modified.clone(),
+                );
+                if let Err(e) = state.task_store.save_snapshot(&snapshot) {
+                    tracing::warn!(task_id = %task_id, error = %e, "保存元数据快照失败");
+                }
+            }
         }
-        Err(e) if matches!(e, qf_core::QfError::Cancelled) => {
+        Err(qf_core::QfError::Cancelled) => {
             cleanup_runtime(&state, &task_id);
             return;
         }
@@ -361,12 +419,34 @@ async fn task_fn(
         }
     }
 
+    let (chunk_progress_tx, mut chunk_progress_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    download_task.set_progress_sender(chunk_progress_tx);
+
     let download_task = Arc::new(tokio::sync::Mutex::new(download_task));
 
     if *control_rx.borrow() == DownloadState::Cancelled {
         cleanup_runtime(&state, &task_id);
         return;
     }
+
+    let chunk_state = state.clone();
+    let chunk_tid = task_id.clone();
+    let chunk_dt = download_task.clone();
+    tokio::spawn(async move {
+        while chunk_progress_rx.recv().await.is_some() {
+            let dt = chunk_dt.lock().await;
+            let downloaded = dt
+                .fragment_infos()
+                .iter()
+                .map(|f| f.downloaded)
+                .sum::<u64>();
+            drop(dt);
+            let mut store = chunk_state.tasks.lock().await;
+            if let Some(task) = store.get_mut(&chunk_tid) {
+                task.downloaded = downloaded;
+            }
+        }
+    });
 
     let monitor_dt = download_task.clone();
     let monitor_ps = state.clone();
@@ -511,6 +591,8 @@ async fn task_fn(
             .collect();
         let _ = state.progress_tx.send(event);
     }
+
+    persist_task_snapshot(&state, &task_id, None).await;
 }
 
 #[derive(Serialize)]
@@ -529,7 +611,7 @@ pub fn get_app_info() -> AppInfo {
 
 #[tauri::command]
 pub fn supported_protocols() -> Vec<&'static str> {
-    vec!["HTTP", "HTTPS", "FTP", "QUIC"]
+    vec!["HTTP", "HTTPS"]
 }
 
 #[tauri::command]
@@ -571,7 +653,8 @@ pub async fn create_task(
 
     let download_dir_str = {
         let cfg = state.config.lock().await;
-        download_dir.unwrap_or_else(|| cfg.download.download_dir.clone())
+        let requested = download_dir.unwrap_or_else(|| cfg.download.download_dir.clone());
+        authorize_download_dir(&cfg, &requested)?
     };
 
     let task = TaskInfo {
@@ -593,6 +676,18 @@ pub async fn create_task(
         store.insert(task_id.clone(), task);
     }
 
+    if let Some(task) = state.tasks.lock().await.get(&task_id).cloned() {
+        let save_path = std::path::Path::new(&download_dir_str)
+            .join(&task.file_name)
+            .to_string_lossy()
+            .to_string();
+        let snapshot =
+            crate::task_store::task_info_to_snapshot(&task, save_path, 0, vec![], None, None);
+        if let Err(e) = state.task_store.save_snapshot(&snapshot) {
+            tracing::warn!(task_id = %task_id, error = %e, "保存初始快照失败");
+        }
+    }
+
     let download_config = {
         let cfg = state.config.lock().await;
         build_download_config(&cfg, &download_dir_str)
@@ -608,6 +703,7 @@ pub async fn create_task(
         progress_tx: state.progress_tx.clone(),
         connection_pool: state.connection_pool.clone(),
         controls: state.controls.clone(),
+        task_store: state.task_store.clone(),
     });
 
     let (control_tx, control_rx) = watch::channel(DownloadState::Downloading);
@@ -640,24 +736,27 @@ pub async fn pause_task(
     state: tauri::State<'_, AppState>,
     task_id: String,
 ) -> Result<(), AppError> {
-    let mut store = state.tasks.lock().await;
+    {
+        let mut store = state.tasks.lock().await;
 
-    let task = store
-        .get_mut(&task_id)
-        .ok_or_else(|| AppError::TaskNotFound(task_id.clone()))?;
+        let task = store
+            .get_mut(&task_id)
+            .ok_or_else(|| AppError::TaskNotFound(task_id.clone()))?;
 
-    match task.status {
-        DownloadState::Pending | DownloadState::Downloading => {
-            task.status = DownloadState::Paused;
-            task.speed = 0;
-            if let Some(control) = state.controls.get(&task_id) {
-                let _ = control.send(DownloadState::Paused);
+        match task.status {
+            DownloadState::Pending | DownloadState::Downloading => {
+                task.status = DownloadState::Paused;
+                task.speed = 0;
+                if let Some(control) = state.controls.get(&task_id) {
+                    let _ = control.send(DownloadState::Paused);
+                }
+                tracing::info!(task_id = %task_id, "暂停任务");
             }
-            tracing::info!(task_id = %task_id, "暂停任务");
-            Ok(())
+            other => return Err(AppError::Config(format!("当前状态 '{}' 不允许暂停", other))),
         }
-        other => Err(AppError::Config(format!("当前状态 '{}' 不允许暂停", other))),
     }
+    persist_task_snapshot(&state, &task_id, None).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -665,25 +764,28 @@ pub async fn resume_task(
     state: tauri::State<'_, AppState>,
     task_id: String,
 ) -> Result<(), AppError> {
-    let mut store = state.tasks.lock().await;
+    {
+        let mut store = state.tasks.lock().await;
 
-    let task = store
-        .get_mut(&task_id)
-        .ok_or_else(|| AppError::TaskNotFound(task_id.clone()))?;
+        let task = store
+            .get_mut(&task_id)
+            .ok_or_else(|| AppError::TaskNotFound(task_id.clone()))?;
 
-    if task.status == DownloadState::Paused {
-        task.status = DownloadState::Downloading;
-        if let Some(control) = state.controls.get(&task_id) {
-            let _ = control.send(DownloadState::Downloading);
+        if task.status == DownloadState::Paused {
+            task.status = DownloadState::Downloading;
+            if let Some(control) = state.controls.get(&task_id) {
+                let _ = control.send(DownloadState::Downloading);
+            }
+            tracing::info!(task_id = %task_id, "恢复任务");
+        } else {
+            return Err(AppError::Config(format!(
+                "仅暂停状态可恢复,当前状态: '{}'",
+                task.status
+            )));
         }
-        tracing::info!(task_id = %task_id, "恢复任务");
-        Ok(())
-    } else {
-        Err(AppError::Config(format!(
-            "仅暂停状态可恢复,当前状态: '{}'",
-            task.status
-        )))
     }
+    persist_task_snapshot(&state, &task_id, None).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -691,26 +793,29 @@ pub async fn cancel_task(
     state: tauri::State<'_, AppState>,
     task_id: String,
 ) -> Result<(), AppError> {
-    let mut store = state.tasks.lock().await;
+    {
+        let mut store = state.tasks.lock().await;
 
-    let task = store
-        .get_mut(&task_id)
-        .ok_or_else(|| AppError::TaskNotFound(task_id.clone()))?;
+        let task = store
+            .get_mut(&task_id)
+            .ok_or_else(|| AppError::TaskNotFound(task_id.clone()))?;
 
-    match task.status {
-        DownloadState::Completed | DownloadState::Cancelled => {
-            Err(AppError::Config(format!("任务已{},无法取消", task.status)))
-        }
-        _ => {
-            if let Some(control) = state.controls.get(&task_id) {
-                let _ = control.send(DownloadState::Cancelled);
+        match task.status {
+            DownloadState::Completed | DownloadState::Cancelled => {
+                return Err(AppError::Config(format!("任务已{},无法取消", task.status)));
             }
+            _ => {
+                if let Some(control) = state.controls.get(&task_id) {
+                    let _ = control.send(DownloadState::Cancelled);
+                }
 
-            update_task_status(&mut store, &task_id, DownloadState::Cancelled);
-            tracing::info!(task_id = %task_id, "取消任务");
-            Ok(())
+                update_task_status(&mut store, &task_id, DownloadState::Cancelled);
+                tracing::info!(task_id = %task_id, "取消任务");
+            }
         }
     }
+    persist_task_snapshot(&state, &task_id, None).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -856,22 +961,9 @@ pub async fn update_config(
     state: tauri::State<'_, AppState>,
     config: AppConfig,
 ) -> Result<(), AppError> {
+    validate_config(&config)?;
     let mut cfg = state.config.lock().await;
-    if !config.download.download_dir.is_empty() {
-        cfg.download.download_dir = config.download.download_dir;
-    }
-    if config.max_concurrent_tasks > 0 {
-        cfg.max_concurrent_tasks = config.max_concurrent_tasks;
-    }
-    if config.download.max_concurrent_fragments > 0 {
-        cfg.download.max_concurrent_fragments = config.download.max_concurrent_fragments;
-    }
-    if config.connection.max_connections_per_host > 0 {
-        cfg.connection.max_connections_per_host = config.connection.max_connections_per_host;
-    }
-    cfg.connection.enable_quic = config.connection.enable_quic;
-    cfg.download.verify_checksum = config.download.verify_checksum;
-    validate_config(&cfg)?;
+    *cfg = config;
     tracing::info!("应用配置已更新");
     Ok(())
 }
@@ -955,7 +1047,8 @@ async fn create_task_inner(
 
     let download_dir_str = {
         let cfg = state.config.lock().await;
-        download_dir.unwrap_or_else(|| cfg.download.download_dir.clone())
+        let requested = download_dir.unwrap_or_else(|| cfg.download.download_dir.clone());
+        authorize_download_dir(&cfg, &requested)?
     };
 
     let task = TaskInfo {
@@ -975,6 +1068,18 @@ async fn create_task_inner(
     {
         let mut store = state.tasks.lock().await;
         store.insert(task_id.clone(), task);
+    }
+
+    if let Some(task) = state.tasks.lock().await.get(&task_id).cloned() {
+        let save_path = std::path::Path::new(&download_dir_str)
+            .join(&task.file_name)
+            .to_string_lossy()
+            .to_string();
+        let snapshot =
+            crate::task_store::task_info_to_snapshot(&task, save_path, 0, vec![], None, None);
+        if let Err(e) = state.task_store.save_snapshot(&snapshot) {
+            tracing::warn!(task_id = %task_id, error = %e, "保存初始快照失败");
+        }
     }
 
     let download_config = {
@@ -999,6 +1104,7 @@ async fn create_task_inner(
         progress_tx: state.progress_tx.clone(),
         connection_pool: state.connection_pool.clone(),
         controls: state.controls.clone(),
+        task_store: state.task_store.clone(),
     });
 
     let (control_tx, control_rx) = watch::channel(DownloadState::Downloading);
@@ -1176,6 +1282,7 @@ async fn update_config_inner(state: &AppState, config: AppConfig) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qf_core::config::USER_AGENT;
     use qf_core::filename::parse_content_disposition;
 
     fn make_test_app_config(
@@ -1196,6 +1303,8 @@ mod tests {
                 verify_checksum,
                 user_agent: USER_AGENT.to_string(),
                 headers: std::collections::HashMap::new(),
+                pause_timeout_secs: 300,
+                authorized_dirs: vec![download_dir.to_string()],
             },
             connection: qf_core::config::ConnectionConfig {
                 max_connections_per_host,
@@ -1210,12 +1319,14 @@ mod tests {
     }
 
     fn test_state() -> Arc<AppState> {
+        let tmp = tempfile::tempdir().unwrap();
         Arc::new(AppState {
             tasks: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(Mutex::new(AppConfig {
                 max_concurrent_tasks: 5,
                 download: DownloadConfig {
                     download_dir: "/default".to_string(),
+                    authorized_dirs: vec!["/default".to_string()],
                     ..DownloadConfig::default()
                 },
                 connection: ConnectionConfig::default(),
@@ -1231,6 +1342,7 @@ mod tests {
                 max_global: 256,
             })),
             controls: Arc::new(DashMap::new()),
+            task_store: Arc::new(crate::task_store::TaskStore::open(tmp.path()).unwrap()),
         })
     }
 
@@ -1276,7 +1388,7 @@ mod tests {
         let id = create_task_inner(
             &state,
             "https://example.com/file.zip".to_string(),
-            Some("/tmp/custom".to_string()),
+            Some("/default".to_string()),
         )
         .await
         .unwrap();
@@ -1442,6 +1554,8 @@ mod tests {
                 verify_checksum: false,
                 user_agent: USER_AGENT.to_string(),
                 headers: std::collections::HashMap::new(),
+                pause_timeout_secs: 300,
+                authorized_dirs: vec!["/data/downloads".to_string()],
             },
             connection: qf_core::config::ConnectionConfig {
                 max_connections_per_host: 8,
@@ -1461,6 +1575,91 @@ mod tests {
         assert_eq!(cfg.connection.max_connections_per_host, 8);
         assert!(cfg.connection.enable_quic);
         assert!(!cfg.download.verify_checksum);
+    }
+
+    #[tokio::test]
+    async fn test_update_config_rejects_invalid_without_mutating_current_config() {
+        let state = test_state();
+        let before = get_config_inner(&state).await.unwrap();
+        let mut invalid = before.clone();
+        invalid.download.max_concurrent_fragments = 128;
+
+        let result = update_config_inner(&state, invalid).await;
+
+        assert!(result.is_err());
+        let after = get_config_inner(&state).await.unwrap();
+        assert_eq!(
+            after.download.max_concurrent_fragments,
+            before.download.max_concurrent_fragments
+        );
+        assert_eq!(after.download.download_dir, before.download.download_dir);
+    }
+
+    #[test]
+    fn test_build_download_config_preserves_download_fields() {
+        let mut cfg = AppConfig::default();
+        cfg.download.max_retries = 9;
+        cfg.download.request_timeout_secs = 120;
+        cfg.download.user_agent = "QuantumFetch/Custom".to_string();
+        cfg.download
+            .headers
+            .insert("Authorization".to_string(), "Bearer token".to_string());
+        cfg.download.pause_timeout_secs = 42;
+        cfg.download.authorized_dirs = vec!["/allowed".to_string()];
+
+        let download = build_download_config(&cfg, "/chosen");
+
+        assert_eq!(download.download_dir, "/chosen");
+        assert_eq!(download.max_retries, 9);
+        assert_eq!(download.request_timeout_secs, 120);
+        assert_eq!(download.user_agent, "QuantumFetch/Custom");
+        assert_eq!(
+            download.headers.get("Authorization").map(String::as_str),
+            Some("Bearer token")
+        );
+        assert_eq!(download.pause_timeout_secs, 42);
+        assert_eq!(download.authorized_dirs, vec!["/allowed".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_persist_task_snapshot_preserves_existing_save_path() {
+        let state = test_state();
+        let task = TaskInfo {
+            id: "task-custom-path".to_string(),
+            url: "https://example.com/file.bin".to_string(),
+            file_name: "file.bin".to_string(),
+            file_size: Some(1024),
+            downloaded: 128,
+            speed: 0,
+            status: DownloadState::Paused,
+            progress: 0.125,
+            fragments_total: 4,
+            fragments_done: 1,
+            created_at: "2026-05-29T00:00:00Z".to_string(),
+        };
+        state
+            .tasks
+            .lock()
+            .await
+            .insert(task.id.clone(), task.clone());
+        let original_snapshot = crate::task_store::task_info_to_snapshot(
+            &task,
+            "/custom/file.bin".to_string(),
+            256,
+            vec![0],
+            None,
+            None,
+        );
+        state.task_store.save_snapshot(&original_snapshot).unwrap();
+
+        persist_task_snapshot(&state, &task.id, None).await;
+
+        let loaded = state.task_store.load_recoverable().unwrap();
+        let snapshot = loaded
+            .iter()
+            .find(|snapshot| snapshot.id == task.id)
+            .unwrap();
+        assert_eq!(snapshot.save_path, "/custom/file.bin");
     }
 
     #[test]
@@ -1682,6 +1881,8 @@ mod tests {
                 verify_checksum: false,
                 user_agent: USER_AGENT.to_string(),
                 headers: std::collections::HashMap::new(),
+                pause_timeout_secs: 300,
+                authorized_dirs: vec!["/tmp".to_string()],
             },
             connection: qf_core::config::ConnectionConfig {
                 max_connections_per_host: 4,
@@ -2119,5 +2320,27 @@ mod tests {
         })
         .await
         .expect("取消后后台任务应有序退出并清理句柄");
+    }
+
+    #[test]
+    fn test_authorize_download_dir_rejects_unlisted_dir() {
+        let mut config = AppConfig::default();
+        config.download.download_dir = "/safe/downloads".to_string();
+        config.download.authorized_dirs = vec!["/safe/downloads".to_string()];
+
+        let err = authorize_download_dir(&config, "/tmp/evil").unwrap_err();
+        assert!(err.to_string().contains("未授权"));
+    }
+
+    #[test]
+    fn test_authorize_download_dir_accepts_default_dir() {
+        let mut config = AppConfig::default();
+        config.download.download_dir = "/safe/downloads".to_string();
+        config.download.authorized_dirs = vec!["/safe/downloads".to_string()];
+
+        assert_eq!(
+            authorize_download_dir(&config, "/safe/downloads").unwrap(),
+            "/safe/downloads"
+        );
     }
 }

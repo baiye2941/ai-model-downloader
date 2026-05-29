@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn test_qf_result_ok() {
         let result: QfResult<i32> = Ok(42);
-        assert_eq!(result.unwrap(), 42);
+        assert!(matches!(result, Ok(42)));
     }
 
     #[test]

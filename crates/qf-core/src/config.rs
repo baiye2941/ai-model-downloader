@@ -6,7 +6,7 @@ pub const USER_AGENT: &str = "QuantumFetch/0.1.0";
 
 /// 下载配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "DownloadConfigSerde")]
 pub struct DownloadConfig {
     /// 下载目录
     pub download_dir: String,
@@ -22,20 +22,65 @@ pub struct DownloadConfig {
     pub user_agent: String,
     /// 自定义请求头
     pub headers: std::collections::HashMap<String, String>,
+    /// 暂停状态最大持续时间(秒)
+    pub pause_timeout_secs: u64,
+    /// 后端允许写入的下载目录列表
+    pub authorized_dirs: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadConfigSerde {
+    download_dir: String,
+    max_concurrent_fragments: u32,
+    max_retries: u32,
+    request_timeout_secs: u64,
+    verify_checksum: bool,
+    user_agent: String,
+    headers: std::collections::HashMap<String, String>,
+    #[serde(default = "default_pause_timeout_secs")]
+    pause_timeout_secs: u64,
+    authorized_dirs: Option<Vec<String>>,
+}
+
+fn default_pause_timeout_secs() -> u64 {
+    300
+}
+
+impl From<DownloadConfigSerde> for DownloadConfig {
+    fn from(value: DownloadConfigSerde) -> Self {
+        let authorized_dirs = value
+            .authorized_dirs
+            .unwrap_or_else(|| vec![value.download_dir.clone()]);
+        Self {
+            download_dir: value.download_dir,
+            max_concurrent_fragments: value.max_concurrent_fragments,
+            max_retries: value.max_retries,
+            request_timeout_secs: value.request_timeout_secs,
+            verify_checksum: value.verify_checksum,
+            user_agent: value.user_agent,
+            headers: value.headers,
+            pause_timeout_secs: value.pause_timeout_secs,
+            authorized_dirs,
+        }
+    }
 }
 
 impl Default for DownloadConfig {
     fn default() -> Self {
+        let download_dir = dirs()
+            .map(|d| d.join("Downloads").to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
         Self {
-            download_dir: dirs()
-                .map(|d| d.join("Downloads").to_string_lossy().to_string())
-                .unwrap_or_else(|| ".".to_string()),
+            download_dir: download_dir.clone(),
             max_concurrent_fragments: 16,
             max_retries: 3,
             request_timeout_secs: 30,
             verify_checksum: true,
             user_agent: USER_AGENT.to_string(),
             headers: std::collections::HashMap::new(),
+            pause_timeout_secs: 300,
+            authorized_dirs: vec![download_dir],
         }
     }
 }
@@ -191,6 +236,35 @@ mod tests {
             deserialized.max_concurrent_fragments,
             config.max_concurrent_fragments
         );
+    }
+
+    #[test]
+    fn test_download_config_pause_timeout_default() {
+        let config = DownloadConfig::default();
+        assert_eq!(config.pause_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_download_config_authorized_dirs_default_contains_download_dir() {
+        let config = DownloadConfig::default();
+        assert!(config.authorized_dirs.contains(&config.download_dir));
+    }
+
+    #[test]
+    fn test_download_config_deserializes_legacy_json() {
+        let json = r#"{
+            "downloadDir":"/tmp/downloads",
+            "maxConcurrentFragments":8,
+            "maxRetries":5,
+            "requestTimeoutSecs":60,
+            "verifyChecksum":false,
+            "userAgent":"QuantumFetch/Legacy",
+            "headers":{}
+        }"#;
+
+        let config: DownloadConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.pause_timeout_secs, 300);
+        assert_eq!(config.authorized_dirs, vec!["/tmp/downloads".to_string()]);
     }
 
     #[test]

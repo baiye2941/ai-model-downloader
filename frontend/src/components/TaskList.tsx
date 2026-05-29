@@ -15,17 +15,14 @@ async function refreshTasks() {
 
 async function handlePause(id: string) {
   await api.pauseTask(id)
-  await refreshTasks()
 }
 
 async function handleResume(id: string) {
   await api.resumeTask(id)
-  await refreshTasks()
 }
 
 async function handleCancel(id: string) {
   await api.cancelTask(id)
-  await refreshTasks()
 }
 
 async function handleDelete(id: string) {

@@ -178,6 +178,7 @@ impl Store for FileStore {
     }
 
     fn set(&self, key: &str, value: String) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
         std::fs::write(self.path_for(key), &value)
     }
 
@@ -262,6 +263,11 @@ impl KvStore {
     /// 读取可反序列化值
     pub fn get<V: for<'de> Deserialize<'de>>(&self, key: &str) -> std::io::Result<Option<V>> {
         self.inner.get_typed(key)
+    }
+
+    /// 读取原始 JSON 字符串
+    pub fn get_raw(&self, key: &str) -> std::io::Result<Option<String>> {
+        self.inner.get(key)
     }
 
     /// 删除键

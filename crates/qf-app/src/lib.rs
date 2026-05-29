@@ -1,8 +1,10 @@
 //! QuantumFetch Tauri 应用库
 
 pub mod commands;
+pub mod task_store;
 
 pub use commands::AppError;
+pub use commands::TaskInfo;
 
 use commands::{
     AppState, add_sniffer_filter, cancel_task, create_task, delete_task, get_app_info, get_config,
@@ -12,8 +14,18 @@ use commands::{
 
 /// 构建并运行 Tauri 应用
 pub fn run() {
+    use tauri::Manager;
     tauri::Builder::default()
         .manage(AppState::new())
+        .setup(|app| {
+            let state = app.state::<AppState>();
+            tauri::async_runtime::block_on(async move {
+                if let Err(e) = state.load_recovered_tasks().await {
+                    tracing::warn!(error = %e, "恢复未完成任务失败");
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // 应用信息
             get_app_info,

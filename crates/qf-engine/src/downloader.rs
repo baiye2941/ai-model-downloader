@@ -165,6 +165,7 @@ pub struct DownloadTask {
     state: DownloadState,
     metadata: Option<FileMetadata>,
     fragments: Vec<FragmentRecord>,
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
 }
 
 impl DownloadTask {
@@ -238,6 +239,7 @@ impl DownloadTask {
             state: DownloadState::Pending,
             metadata: None,
             fragments: Vec::new(),
+            progress_tx: None,
         })
     }
 
@@ -261,6 +263,7 @@ impl DownloadTask {
             state: DownloadState::Pending,
             metadata: None,
             fragments: Vec::new(),
+            progress_tx: None,
         }
     }
 
@@ -268,15 +271,25 @@ impl DownloadTask {
         self.control_rx = Some(control_rx);
     }
 
-    async fn wait_control_rx(rx: &mut watch::Receiver<DownloadState>) -> QfResult<()> {
+    pub fn set_progress_sender(&mut self, tx: tokio::sync::mpsc::UnboundedSender<()>) {
+        self.progress_tx = Some(tx);
+    }
+
+    async fn wait_control_rx(
+        rx: &mut watch::Receiver<DownloadState>,
+        pause_timeout: Duration,
+    ) -> QfResult<()> {
         loop {
             let state = *rx.borrow_and_update();
             match state {
                 DownloadState::Cancelled => return Err(QfError::Cancelled),
                 DownloadState::Failed => return Err(QfError::Other("任务已失败".into())),
                 DownloadState::Paused => {
-                    rx.changed()
+                    tokio::time::timeout(pause_timeout, rx.changed())
                         .await
+                        .map_err(|_| {
+                            QfError::Timeout(format!("暂停超过 {} 秒", pause_timeout.as_secs()))
+                        })?
                         .map_err(|_| QfError::Other("控制通道已关闭".into()))?;
                 }
                 _ => return Ok(()),
@@ -284,9 +297,12 @@ impl DownloadTask {
         }
     }
 
-    async fn wait_control(control_rx: &mut Option<watch::Receiver<DownloadState>>) -> QfResult<()> {
+    async fn wait_control(
+        control_rx: &mut Option<watch::Receiver<DownloadState>>,
+        pause_timeout: Duration,
+    ) -> QfResult<()> {
         if let Some(rx) = control_rx.as_mut() {
-            Self::wait_control_rx(rx).await?;
+            Self::wait_control_rx(rx, pause_timeout).await?;
         }
         Ok(())
     }
@@ -460,7 +476,8 @@ impl DownloadTask {
 
     /// 整块下载(不支持 Range 或单分片)
     async fn execute_full_download(&mut self) -> QfResult<()> {
-        Self::wait_control(&mut self.control_rx).await?;
+        let pause_timeout = Duration::from_secs(self.config.pause_timeout_secs);
+        Self::wait_control(&mut self.control_rx, pause_timeout).await?;
         let host = self.request_host()?;
         let _pool_permit = match &self.pool {
             Some(pool) => Some(pool.acquire(&host).await?),
@@ -470,7 +487,7 @@ impl DownloadTask {
         let data = if let Some(rx) = self.control_rx.as_mut() {
             tokio::select! {
                 result = self.protocol.download_full(&self.url) => result?,
-                control = Self::wait_control_rx(rx) => {
+                control = Self::wait_control_rx(rx, pause_timeout) => {
                     control?;
                     return Err(QfError::Other("控制信号异常结束".into()));
                 }
@@ -540,7 +557,9 @@ impl DownloadTask {
         let protocol = self.protocol.clone();
         let pool = self.pool.clone();
         let host = self.request_host()?;
+        let pause_timeout = Duration::from_secs(self.config.pause_timeout_secs);
         let control_rx = self.control_rx.clone();
+        let progress_tx = self.progress_tx.clone();
 
         let mut handles: Vec<JoinHandle<QfResult<(u32, u64, Duration)>>> = Vec::new();
 
@@ -558,6 +577,7 @@ impl DownloadTask {
             let frag_pool = pool.clone();
             let frag_host = host.clone();
             let mut frag_control_rx = control_rx.clone();
+            let frag_progress_tx = progress_tx.clone();
 
             if frag_index as usize >= self.fragments.len() {
                 return Err(QfError::Config("分片索引越界".into()));
@@ -573,7 +593,7 @@ impl DownloadTask {
                     .map_err(|e| QfError::Other(format!("信号量获取失败: {e}").into()))?;
 
                 if let Some(rx) = frag_control_rx.as_mut() {
-                    DownloadTask::wait_control_rx(rx).await?;
+                    DownloadTask::wait_control_rx(rx, pause_timeout).await?;
                 }
 
                 let _pool_permit = match &frag_pool {
@@ -593,7 +613,7 @@ impl DownloadTask {
                 let stream = if let Some(rx) = frag_control_rx.as_mut() {
                     tokio::select! {
                         result = frag_protocol.download_range_stream(&frag_url, frag_start, frag_end) => result?,
-                        control = DownloadTask::wait_control_rx(rx) => {
+                        control = DownloadTask::wait_control_rx(rx, pause_timeout) => {
                             control?;
                             return Err(QfError::Other("控制信号异常结束".into()));
                         }
@@ -609,12 +629,15 @@ impl DownloadTask {
                 tokio::pin!(stream);
                 while let Some(chunk_result) = tokio_stream::StreamExt::next(&mut stream).await {
                     if let Some(rx) = frag_control_rx.as_mut() {
-                        DownloadTask::wait_control_rx(rx).await?;
+                        DownloadTask::wait_control_rx(rx, pause_timeout).await?;
                     }
                     let chunk = chunk_result?;
                     let written = frag_storage.write_at(pos, &chunk).await?;
                     pos += written as u64;
                     total_written += written as u64;
+                    if let Some(tx) = &frag_progress_tx {
+                        let _ = tx.send(());
+                    }
                 }
 
                 let elapsed = start_instant.elapsed();
@@ -760,12 +783,20 @@ impl DownloadTask {
 
         let result = self.run_inner().await;
 
-        if result.is_err() {
-            self.state = DownloadState::Failed;
-            warn!("下载任务失败");
+        if let Err(error) = &result {
+            self.apply_terminal_error(error);
+            warn!(state = ?self.state, error = %error, "下载任务结束为非成功状态");
         }
 
         result
+    }
+
+    fn apply_terminal_error(&mut self, error: &QfError) {
+        if matches!(error, QfError::Cancelled) || self.state == DownloadState::Cancelled {
+            self.state = DownloadState::Cancelled;
+        } else {
+            self.state = DownloadState::Failed;
+        }
     }
 
     /// 内部执行逻辑,便于 run() 统一处理错误状态
@@ -951,10 +982,10 @@ mod tests {
         task.prepare_storage().await.unwrap();
 
         // 验证内存存储已分配
-        if let Some(ref storage) = task.storage {
-            if let StorageKind::Memory(ref s) = **storage {
-                assert_eq!(s.file_size().await.unwrap(), file_size);
-            }
+        if let Some(ref storage) = task.storage
+            && let StorageKind::Memory(ref s) = **storage
+        {
+            assert_eq!(s.file_size().await.unwrap(), file_size);
         }
     }
 
@@ -1864,6 +1895,37 @@ mod tests {
         };
         assert!(stored.iter().all(|byte| *byte == 0), "暂停期间不应写入数据");
         control_tx.send(DownloadState::Cancelled).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_paused_control_respects_pause_timeout() {
+        let data = Bytes::from(vec![0xEE; 100]);
+        let protocol: Arc<dyn Protocol> = Arc::new(
+            MockProto::new(test_metadata("paused-timeout.bin", 100)).with_range_data(0, 99, data),
+        );
+        let storage = StorageKind::memory_with_capacity(100);
+        let mut task = DownloadTask::new_for_test(
+            "http://example.com/paused-timeout.bin".into(),
+            DownloadConfig {
+                max_concurrent_fragments: 1,
+                pause_timeout_secs: 1,
+                verify_checksum: false,
+                ..test_config()
+            },
+            protocol,
+            storage,
+        );
+        let (_control_tx, control_rx) = watch::channel(DownloadState::Paused);
+        task.set_control_rx(control_rx);
+
+        task.probe().await.unwrap();
+        task.plan().unwrap();
+        task.prepare_storage().await.unwrap();
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(1500), task.execute()).await;
+        assert!(result.is_ok(), "暂停超时后不应永久等待控制信号");
+        assert!(result.unwrap().is_err(), "暂停超时应返回错误");
     }
 
     #[tokio::test]
