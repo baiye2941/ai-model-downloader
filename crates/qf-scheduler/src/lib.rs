@@ -6,8 +6,10 @@
 //! - 连接分配策略
 //! - 任务生命周期管理
 
+pub mod download_scheduler;
 pub mod predictor;
 pub mod scheduler;
 
+pub use download_scheduler::AdaptiveDownloadScheduler;
 pub use predictor::HoltWintersPredictor;
 pub use scheduler::{Priority, ScheduledTask, Scheduler};

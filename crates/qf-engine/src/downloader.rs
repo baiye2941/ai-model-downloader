@@ -10,21 +10,23 @@
 //! `run()` 方法一键执行上述全部步骤。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use qf_core::config::DownloadConfig;
-use qf_core::traits::Protocol;
 #[cfg(test)]
 use qf_core::traits::Storage;
+use qf_core::traits::{DownloadScheduler, Protocol};
 use qf_core::types::{DownloadState, FileMetadata, FragmentInfo, TaskId};
 use qf_core::{QfError, QfResult};
 use qf_crypto::cpu::CpuVerifier;
 use qf_io::TokioFile;
 use qf_io::storage::AsyncStorage;
 use qf_protocol::http::HttpClient;
+use qf_scheduler::AdaptiveDownloadScheduler;
 
 use crate::connection::ConnectionPool;
 use crate::fragment::FragmentRecord;
@@ -146,13 +148,18 @@ impl VerifierKind {
 /// 单个下载任务的执行器
 ///
 /// 串联协议层、存储层、校验层,提供完整的下载编排流程。
+/// 支持自适应调度器,根据带宽预测动态调整并发度和分片大小。
+/// 存储延迟初始化:在 `probe()` 获取真实文件名后,通过 `init_storage()`
+/// 配合 `validate_save_path()` 纵深防御创建存储。
 pub struct DownloadTask {
     pub id: TaskId,
     pub url: String,
     pub config: DownloadConfig,
     protocol: Arc<dyn Protocol>,
-    storage: Arc<StorageKind>,
+    /// 延迟初始化:probe() 后通过 init_storage() 创建
+    storage: Option<Arc<StorageKind>>,
     orchestrator: DownloadOrchestrator,
+    scheduler: Arc<dyn DownloadScheduler>,
     #[allow(dead_code)]
     pool: Option<Arc<ConnectionPool>>,
     state: DownloadState,
@@ -163,16 +170,45 @@ pub struct DownloadTask {
 impl DownloadTask {
     /// 创建新的下载任务
     ///
-    /// 根据 URL scheme 自动选择协议后端,使用默认 blake3 校验器。
+    /// 根据 URL scheme 自动选择协议后端,使用默认 blake3 校验器和自适应调度器。
     /// 存储文件位于 `config.download_dir` 目录下,文件名在 `probe` 阶段确定。
     pub async fn new(url: String, config: DownloadConfig) -> QfResult<Self> {
-        Self::with_pool(url, config, None).await
+        Self::with_scheduler(
+            url,
+            config,
+            Arc::new(AdaptiveDownloadScheduler::default_config()),
+        )
+        .await
+    }
+
+    /// 使用指定调度器创建下载任务
+    pub async fn with_scheduler(
+        url: String,
+        config: DownloadConfig,
+        scheduler: Arc<dyn DownloadScheduler>,
+    ) -> QfResult<Self> {
+        Self::with_pool_and_scheduler(url, config, None, scheduler).await
     }
 
     pub async fn with_pool(
         url: String,
         config: DownloadConfig,
         #[allow(dead_code)] pool: Option<Arc<ConnectionPool>>,
+    ) -> QfResult<Self> {
+        Self::with_pool_and_scheduler(
+            url,
+            config,
+            pool,
+            Arc::new(AdaptiveDownloadScheduler::default_config()),
+        )
+        .await
+    }
+
+    pub async fn with_pool_and_scheduler(
+        url: String,
+        config: DownloadConfig,
+        #[allow(dead_code)] pool: Option<Arc<ConnectionPool>>,
+        scheduler: Arc<dyn DownloadScheduler>,
     ) -> QfResult<Self> {
         let _parsed = url::Url::parse(&url)?;
 
@@ -182,9 +218,8 @@ impl DownloadTask {
             } else {
                 return Err(QfError::Config(format!("不支持的协议: {url}")));
             };
-        let storage_path = std::path::Path::new(&config.download_dir).join("qf_temp_download");
-        let storage = Arc::new(StorageKind::open(&storage_path).await?);
 
+        // 存储延迟到 probe() 之后初始化,使用真实文件名 + validate_save_path
         let orchestrator = match &pool {
             Some(p) => DownloadOrchestrator::with_shared_pool(p.clone(), Default::default()),
             None => DownloadOrchestrator::new(Default::default()),
@@ -195,8 +230,9 @@ impl DownloadTask {
             url,
             config,
             protocol,
-            storage,
+            storage: None,
             orchestrator,
+            scheduler,
             pool,
             state: DownloadState::Pending,
             metadata: None,
@@ -216,8 +252,9 @@ impl DownloadTask {
             url,
             config,
             protocol,
-            storage: Arc::new(storage),
+            storage: Some(Arc::new(storage)),
             orchestrator: DownloadOrchestrator::new(Default::default()),
+            scheduler: Arc::new(AdaptiveDownloadScheduler::default_config()),
             pool: None,
             state: DownloadState::Pending,
             metadata: None,
@@ -245,11 +282,44 @@ impl DownloadTask {
             .ok_or_else(|| QfError::Config("探测完成但元数据未填充".into()))
     }
 
+    /// 初始化存储(延迟到 probe() 之后)
+    ///
+    /// 使用 metadata 中的真实文件名构造保存路径,
+    /// 并通过 `validate_save_path()` 做纵深防御校验。
+    async fn init_storage(&mut self) -> QfResult<()> {
+        if self.storage.is_some() {
+            return Ok(());
+        }
+
+        let metadata = self
+            .metadata
+            .as_ref()
+            .ok_or_else(|| QfError::Config("必须先调用 probe() 获取文件元数据".into()))?;
+
+        let safe_name = &metadata.file_name;
+        let download_dir = std::path::Path::new(&self.config.download_dir);
+        let final_path = download_dir.join(safe_name);
+
+        // 纵深防御:校验路径不逃逸下载目录
+        let canonical_path = qf_core::validate_save_path(&final_path, download_dir)?;
+
+        info!(
+            safe_name = %safe_name,
+            save_path = %canonical_path.display(),
+            "路径安全校验通过,创建存储"
+        );
+
+        let storage = StorageKind::open(&canonical_path).await?;
+        self.storage = Some(Arc::new(storage));
+        Ok(())
+    }
+
     // ----- 步骤 2: 规划分片 -----
 
     /// 根据已探测的文件元数据规划分片
     ///
     /// 调用编排器计算最优分片策略,生成分片列表并存入内部状态。
+    /// 使用调度器的带宽预测动态调整分片大小。
     /// 必须在 `probe()` 之后调用。
     pub fn plan(&mut self) -> QfResult<Vec<FragmentInfo>> {
         let metadata = self
@@ -258,9 +328,31 @@ impl DownloadTask {
             .ok_or_else(|| QfError::Config("必须先调用 probe() 获取文件元数据".into()))?;
 
         let file_size = metadata.file_size.unwrap_or(0);
-        let fragments = self
-            .orchestrator
-            .plan_fragments(file_size, metadata.supports_range);
+
+        // 使用调度器获取分片大小建议
+        let recommendation = self
+            .scheduler
+            .recommend(file_size, self.config.max_concurrent_fragments);
+
+        debug!(
+            predicted_bandwidth = self.scheduler.predicted_bandwidth(),
+            recommended_fragment_size = recommendation.fragment_size,
+            recommended_concurrency = recommendation.concurrency,
+            confidence = recommendation.confidence,
+            "调度器建议"
+        );
+
+        let suggested_frag_size = if recommendation.confidence > 0.0 {
+            Some(recommendation.fragment_size)
+        } else {
+            None
+        };
+
+        let fragments = self.orchestrator.plan_fragments(
+            file_size,
+            metadata.supports_range,
+            suggested_frag_size,
+        );
 
         info!(count = fragments.len(), "分片规划完成");
 
@@ -284,8 +376,12 @@ impl DownloadTask {
             .ok_or_else(|| QfError::Config("必须先调用 probe() 获取文件元数据".into()))?;
 
         let size = metadata.file_size.unwrap_or(0);
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| QfError::Config("存储未初始化".into()))?;
         if size > 0 {
-            self.storage.allocate(size).await?;
+            storage.allocate(size).await?;
             debug!(size, "存储空间预分配完成");
         }
         Ok(())
@@ -328,7 +424,11 @@ impl DownloadTask {
     /// 整块下载(不支持 Range 或单分片)
     async fn execute_full_download(&mut self) -> QfResult<()> {
         let data = self.protocol.download_full(&self.url).await?;
-        let written = self.storage.write_at(0, &data).await?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| QfError::Config("存储未初始化".into()))?;
+        let written = storage.write_at(0, &data).await?;
         debug!(written, "整块下载写入完成");
 
         if let Some(frag) = self.fragments.first_mut() {
@@ -339,37 +439,69 @@ impl DownloadTask {
     }
 
     /// 并发分片下载
+    ///
+    /// 将信号量获取移入 spawn 任务内部,确保分片任务立即启动网络请求,
+    /// 仅在实际占用并发槽位时才等待信号量,最大化网络并发。
+    /// 使用调度器的带宽预测动态调整并发度。
     async fn execute_fragmented_download(&mut self) -> QfResult<()> {
         if self.config.max_concurrent_fragments == 0 {
             return Err(QfError::Config(
                 "max_concurrent_fragments 不能为 0".to_string(),
             ));
         }
-        let semaphore = Arc::new(Semaphore::new(
-            self.config.max_concurrent_fragments as usize,
-        ));
+
+        // 使用调度器获取动态并发建议
+        let file_size = self
+            .metadata
+            .as_ref()
+            .and_then(|m| m.file_size)
+            .unwrap_or(0);
+        let recommendation = self
+            .scheduler
+            .recommend(file_size, self.config.max_concurrent_fragments);
+
+        // 使用调度器建议的并发度,但不超过配置的最大值
+        let effective_concurrency = recommendation
+            .concurrency
+            .min(self.config.max_concurrent_fragments)
+            .max(1) as usize;
+
+        info!(
+            configured_concurrency = self.config.max_concurrent_fragments,
+            recommended_concurrency = recommendation.concurrency,
+            effective_concurrency = effective_concurrency,
+            confidence = recommendation.confidence,
+            "使用调度器并发建议"
+        );
+
+        let semaphore = Arc::new(Semaphore::new(effective_concurrency));
         let url = self.url.clone();
-        let storage = self.storage.clone();
+        let storage = self
+            .storage
+            .clone()
+            .ok_or_else(|| QfError::Config("存储未初始化".into()))?;
         let protocol = self.protocol.clone();
 
-        let mut handles: Vec<JoinHandle<QfResult<(u32, u64)>>> = Vec::new();
+        let mut handles: Vec<JoinHandle<QfResult<(u32, u64, Duration)>>> = Vec::new();
 
         for frag in &self.fragments {
-            let permit = semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|e| QfError::Other(format!("信号量获取失败: {e}").into()))?;
-
             let frag_url = url.clone();
             let frag_storage = storage.clone();
             let frag_protocol = protocol.clone();
             let frag_index = frag.info.index;
             let frag_start = frag.info.start;
             let frag_end = frag.info.end;
+            let frag_semaphore = semaphore.clone();
 
             let handle = tokio::spawn(async move {
-                let _permit = permit;
+                // 信号量获取移入 spawn 内部:分片任务立即启动,
+                // 仅在需要实际占用并发槽位时才等待
+                let permit = frag_semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| QfError::Other(format!("信号量获取失败: {e}").into()))?;
+
+                let start_instant = std::time::Instant::now();
 
                 debug!(
                     index = frag_index,
@@ -392,12 +524,18 @@ impl DownloadTask {
                     total_written += written as u64;
                 }
 
+                let elapsed = start_instant.elapsed();
+
+                // 持有 permit 直到下载完成,确保并发限制生效
+                drop(permit);
+
                 info!(
                     index = frag_index,
                     written = total_written as usize,
+                    elapsed_ms = elapsed.as_millis(),
                     "分片下载完成"
                 );
-                Ok((frag_index, total_written))
+                Ok((frag_index, total_written, elapsed))
             });
 
             handles.push(handle);
@@ -416,14 +554,31 @@ impl DownloadTask {
                 .await
                 .map_err(|e| QfError::Other(format!("分片任务 panic: {e}").into()))?;
 
-            let (index, downloaded) = result?;
+            let (index, downloaded, duration) = result?;
 
             let frag = &mut self.fragments[index as usize];
-            frag.info.downloaded = downloaded;
-            frag.state = crate::fragment::FragmentState::Done;
+            frag.start_download();
+            frag.complete_download_fast(downloaded, duration);
+
+            // 将带宽数据反馈给调度器
+            if let Some(duration) = frag.last_duration {
+                let bytes_per_sec = if duration.as_secs_f64() > 0.0 {
+                    (downloaded as f64 / duration.as_secs_f64()) as u64
+                } else {
+                    0
+                };
+                if bytes_per_sec > 0 {
+                    self.scheduler.observe_bandwidth(bytes_per_sec);
+                    debug!(
+                        index = index,
+                        bytes_per_sec = bytes_per_sec,
+                        "带宽数据已反馈给调度器"
+                    );
+                }
+            }
         }
 
-        self.storage.sync().await?;
+        self.storage.as_ref().unwrap().sync().await?;
         self.state = DownloadState::Completed;
         info!("全部分片下载完成");
         Ok(())
@@ -444,6 +599,11 @@ impl DownloadTask {
         self.state = DownloadState::Verifying;
         info!("开始校验文件完整性");
 
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| QfError::Config("存储未初始化".into()))?;
+
         for frag in &self.fragments {
             if let Some(ref expected_hash) = frag.info.hash {
                 let chunk_size = 1024 * 1024;
@@ -454,7 +614,7 @@ impl DownloadTask {
                 while offset < end {
                     let read_len = ((end - offset).min(chunk_size as u64)) as usize;
                     let mut buf = vec![0u8; read_len];
-                    let read = self.storage.read_at(offset, &mut buf).await?;
+                    let read = storage.read_at(offset, &mut buf).await?;
                     hasher.update(&buf[..read]);
                     offset += read as u64;
                 }
@@ -506,6 +666,9 @@ impl DownloadTask {
     async fn run_inner(&mut self) -> QfResult<()> {
         // 步骤 1: 探测
         self.probe().await?;
+
+        // 步骤 1.5: 初始化存储(使用真实文件名 + validate_save_path 纵深防御)
+        self.init_storage().await?;
 
         // 步骤 2: 规划分片
         self.plan()?;
@@ -682,8 +845,10 @@ mod tests {
         task.prepare_storage().await.unwrap();
 
         // 验证内存存储已分配
-        if let StorageKind::Memory(ref s) = *task.storage {
-            assert_eq!(s.file_size().await.unwrap(), file_size);
+        if let Some(ref storage) = task.storage {
+            if let StorageKind::Memory(ref s) = **storage {
+                assert_eq!(s.file_size().await.unwrap(), file_size);
+            }
         }
     }
 
@@ -747,7 +912,12 @@ mod tests {
 
         // 验证写入数据的正确性
         let mut buf = vec![0u8; total_size as usize];
-        task.storage.read_at(0, &mut buf).await.unwrap();
+        task.storage
+            .as_ref()
+            .unwrap()
+            .read_at(0, &mut buf)
+            .await
+            .unwrap();
         assert_eq!(&buf[..frag_size as usize], &frag_a[..]);
         assert_eq!(
             &buf[frag_size as usize..2 * frag_size as usize],
@@ -956,7 +1126,12 @@ mod tests {
         );
 
         // 手动写入数据到存储
-        task.storage.write_at(0, &data).await.unwrap();
+        task.storage
+            .as_ref()
+            .unwrap()
+            .write_at(0, &data)
+            .await
+            .unwrap();
 
         // 设置分片记录
         task.fragments = vec![FragmentRecord::new(frag_info, 3)];
@@ -991,7 +1166,12 @@ mod tests {
             },
         );
 
-        task.storage.write_at(0, &data).await.unwrap();
+        task.storage
+            .as_ref()
+            .unwrap()
+            .write_at(0, &data)
+            .await
+            .unwrap();
         task.fragments = vec![FragmentRecord::new(frag_info, 3)];
         task.metadata = Some(test_metadata("c.bin", data.len() as u64));
 

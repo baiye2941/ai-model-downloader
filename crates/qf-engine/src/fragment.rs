@@ -67,6 +67,21 @@ impl FragmentRecord {
         self.state = FragmentState::Verifying;
     }
 
+    /// 下载完成并直接流转到 Done 状态
+    ///
+    /// 用于 spawn 内已完成下载和写入的场景,跳过 Verifying/Writing 中间状态,
+    /// 但仍正确设置 `last_duration` 以激活调度器反馈回路。
+    pub fn complete_download_fast(&mut self, downloaded: u64, duration: Duration) {
+        debug_assert!(
+            self.state == FragmentState::Downloading,
+            "非法状态转换: {:?} -> Done(fast)",
+            self.state
+        );
+        self.info.downloaded = downloaded;
+        self.last_duration = Some(duration);
+        self.state = FragmentState::Done;
+    }
+
     /// 校验通过,转换到写入状态(仅允许从 Verifying 进入)
     pub fn verify_ok(&mut self) {
         debug_assert!(

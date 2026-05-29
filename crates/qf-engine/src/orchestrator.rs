@@ -60,14 +60,18 @@ impl DownloadOrchestrator {
     /// 根据文件大小、服务端 Range 支持情况和当前带宽估计,生成分片列表。
     /// - 文件大小为 0 时返回空列表
     /// - 服务端不支持 Range 时返回单个分片覆盖整个文件
-    /// - 正常情况下调用 `compute_fragment_size` 计算动态分片大小
-    pub fn plan_fragments(&self, file_size: u64, supports_range: bool) -> Vec<FragmentInfo> {
-        // 空文件无需分片
+    /// - 当 `suggested_frag_size` 为 `Some(size)` 且 `size > 0` 时,优先使用调度器建议的分片大小
+    /// - 否则调用 `compute_fragment_size` 计算动态分片大小
+    pub fn plan_fragments(
+        &self,
+        file_size: u64,
+        supports_range: bool,
+        suggested_frag_size: Option<u64>,
+    ) -> Vec<FragmentInfo> {
         if file_size == 0 {
             return Vec::new();
         }
 
-        // 服务端不支持 Range 请求,只能整块下载
         if !supports_range {
             return vec![FragmentInfo {
                 index: 0,
@@ -79,14 +83,19 @@ impl DownloadOrchestrator {
             }];
         }
 
-        let bandwidth_bps = self.bandwidth.estimate();
-        let frag_size = compute_fragment_size(
-            file_size,
-            bandwidth_bps,
-            self.scheduler_config.min_fragment_size,
-            self.scheduler_config.max_fragment_size,
-            self.pool.config().max_global, // 分片数上限取全局连接数
-        );
+        let frag_size = match suggested_frag_size {
+            Some(size) if size > 0 => size,
+            _ => {
+                let bandwidth_bps = self.bandwidth.estimate();
+                compute_fragment_size(
+                    file_size,
+                    bandwidth_bps,
+                    self.scheduler_config.min_fragment_size,
+                    self.scheduler_config.max_fragment_size,
+                    self.pool.config().max_global,
+                )
+            }
+        };
 
         // frag_size 为 0 的防御(理论上 file_size > 0 时不会发生)
         if frag_size == 0 {
@@ -199,7 +208,7 @@ mod tests {
     fn test_plan_fragments_normal_range_supported() {
         let orch = make_orchestrator();
         // 100MB 文件,支持 Range
-        let frags = orch.plan_fragments(100 * 1024 * 1024, true);
+        let frags = orch.plan_fragments(100 * 1024 * 1024, true, None);
         assert!(!frags.is_empty(), "应至少生成一个分片");
 
         // 验证连续性和完整性
@@ -228,7 +237,7 @@ mod tests {
     fn test_plan_fragments_small_file() {
         let orch = make_orchestrator();
         // 500 字节文件,支持 Range —— 小于 min_fragment_size
-        let frags = orch.plan_fragments(500, true);
+        let frags = orch.plan_fragments(500, true, None);
         assert_eq!(frags.len(), 1, "小于最小分片的文件应只产生一个分片");
         assert_eq!(frags[0].start, 0);
         assert_eq!(frags[0].end, 499);
@@ -240,7 +249,7 @@ mod tests {
         let orch = make_orchestrator();
         // 恰好等于 min_fragment_size (1MB)
         let size = 1024 * 1024u64;
-        let frags = orch.plan_fragments(size, true);
+        let frags = orch.plan_fragments(size, true, None);
         let total: u64 = frags.iter().map(|f| f.size).sum();
         assert_eq!(total, size);
     }
@@ -250,21 +259,21 @@ mod tests {
     #[test]
     fn test_plan_fragments_empty_file() {
         let orch = make_orchestrator();
-        let frags = orch.plan_fragments(0, true);
+        let frags = orch.plan_fragments(0, true, None);
         assert!(frags.is_empty(), "空文件不应产生任何分片");
     }
 
     #[test]
     fn test_plan_fragments_empty_file_no_range() {
         let orch = make_orchestrator();
-        let frags = orch.plan_fragments(0, false);
+        let frags = orch.plan_fragments(0, false, None);
         assert!(frags.is_empty(), "空文件无论是否支持 Range 都不应产生分片");
     }
 
     #[test]
     fn test_plan_fragments_single_byte() {
         let orch = make_orchestrator();
-        let frags = orch.plan_fragments(1, true);
+        let frags = orch.plan_fragments(1, true, None);
         assert_eq!(frags.len(), 1);
         assert_eq!(frags[0].size, 1);
         assert_eq!(frags[0].start, 0);
@@ -277,7 +286,7 @@ mod tests {
     fn test_plan_fragments_no_range_support() {
         let orch = make_orchestrator();
         let file_size = 50 * 1024 * 1024u64; // 50MB
-        let frags = orch.plan_fragments(file_size, false);
+        let frags = orch.plan_fragments(file_size, false, None);
         assert_eq!(frags.len(), 1, "不支持 Range 时应只产生单个分片");
         assert_eq!(frags[0].index, 0);
         assert_eq!(frags[0].start, 0);
@@ -354,7 +363,7 @@ mod tests {
             DownloadOrchestrator::with_scheduler_config(PoolConfig::default(), config.clone());
 
         // 验证配置被正确传入(通过检查分片大小约束)
-        let frags = orch.plan_fragments(10 * 1024 * 1024, true);
+        let frags = orch.plan_fragments(10 * 1024 * 1024, true, None);
         for frag in &frags {
             assert!(frag.size >= config.min_fragment_size || frag.size == 10 * 1024 * 1024);
         }
@@ -372,7 +381,7 @@ mod tests {
     fn test_plan_fragments_large_file_total_coverage() {
         let orch = make_orchestrator();
         let file_size = 1024 * 1024 * 1024u64; // 1GB
-        let frags = orch.plan_fragments(file_size, true);
+        let frags = orch.plan_fragments(file_size, true, None);
         let total: u64 = frags.iter().map(|f| f.size).sum();
         assert_eq!(total, file_size, "所有分片大小之和必须等于文件大小");
 
@@ -380,5 +389,40 @@ mod tests {
         for window in frags.windows(2) {
             assert_eq!(window[0].end + 1, window[1].start, "相邻分片之间不应有间隙");
         }
+    }
+
+    // ------ suggested_frag_size 测试 ------
+
+    #[test]
+    fn test_plan_fragments_with_suggested_size() {
+        let orch = make_orchestrator();
+        let file_size = 10 * 1024 * 1024u64;
+        let suggested = 2 * 1024 * 1024u64;
+
+        let frags = orch.plan_fragments(file_size, true, Some(suggested));
+        assert!(!frags.is_empty());
+
+        // 每个分片(除最后一个)大小应为 suggested
+        for frag in &frags[..frags.len() - 1] {
+            assert_eq!(frag.size, suggested, "非末尾分片大小应为建议值");
+        }
+
+        let total: u64 = frags.iter().map(|f| f.size).sum();
+        assert_eq!(total, file_size);
+    }
+
+    #[test]
+    fn test_plan_fragments_suggested_size_zero_falls_back() {
+        let orch = make_orchestrator();
+        let file_size = 10 * 1024 * 1024u64;
+
+        // suggested=0 应回退到内部计算
+        let frags_zero = orch.plan_fragments(file_size, true, Some(0));
+        let frags_none = orch.plan_fragments(file_size, true, None);
+        assert_eq!(
+            frags_zero.len(),
+            frags_none.len(),
+            "suggested=0 应与 None 结果一致"
+        );
     }
 }

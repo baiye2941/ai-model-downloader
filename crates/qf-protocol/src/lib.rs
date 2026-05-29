@@ -250,6 +250,7 @@ fn mpquic() {
     assert_eq!(state, PathState::Closed);
 
     // 验证多路径调度:带宽加权分配
+    #[allow(dead_code)]
     struct PathInfo {
         id: PathId,
         bandwidth: u64,

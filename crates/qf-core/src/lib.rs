@@ -21,7 +21,10 @@ pub use config::AppConfig;
 pub use config::SchedulerConfig;
 pub use config::USER_AGENT;
 pub use error::{QfError, QfResult};
-pub use filename::{extract_filename, extract_filename_from_url, parse_content_disposition};
+pub use filename::{
+    extract_filename, extract_filename_from_url, parse_content_disposition, sanitize_filename,
+    validate_save_path,
+};
 pub use traits::{ByteStream, Protocol, Storage, Verifier};
 pub use types::{
     DownloadState, DownloadStateChange, FileMetadata, FragmentInfo, TaskId, TaskProgress,

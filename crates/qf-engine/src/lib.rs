@@ -63,7 +63,6 @@ fn resume_download() {
     use qf_core::types::FragmentInfo;
 
     // 模拟一个 4 分片的下载任务,其中分片 0 和 1 已完成
-    let total_size = 4000u64;
     let frag_size = 1000u64;
     let all_fragments: Vec<FragmentInfo> = (0..4)
         .map(|i| FragmentInfo {

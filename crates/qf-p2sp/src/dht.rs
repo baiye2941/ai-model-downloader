@@ -3,7 +3,6 @@
 //! 基于 Kademlia 协议的分布式哈希表,用于 Peer 发现。
 //! 包含 XOR 距离度量、k-bucket 路由表、迭代查找算法。
 
-use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hasher};
 use std::time::{Duration, SystemTime};
 

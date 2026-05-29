@@ -10,6 +10,7 @@ qf-core = { path = "../qf-core" }
 qf-io = { path = "../qf-io" }
 qf-protocol = { path = "../qf-protocol" }
 qf-crypto = { path = "../qf-crypto" }
+qf-scheduler = { path = "../qf-scheduler" }
 tokio.workspace = true
 tokio-stream = "0.1"
 blake3.workspace = true

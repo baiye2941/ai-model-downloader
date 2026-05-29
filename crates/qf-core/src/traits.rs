@@ -141,3 +141,45 @@ pub trait FragmentDownloader: Send + Sync {
     /// 取消分片下载
     fn cancel(&self, task_id: TaskId, fragment_index: u32) -> QfResult<()>;
 }
+
+/// 下载调度建议
+///
+/// 调度器根据带宽预测和文件特征返回的动态配置建议。
+#[derive(Debug, Clone)]
+pub struct ScheduleRecommendation {
+    /// 建议的并发分片数
+    pub concurrency: u32,
+    /// 建议的分片大小(字节)
+    pub fragment_size: u64,
+    /// 带宽预测置信度(0.0 ~ 1.0)
+    pub confidence: f64,
+}
+
+impl Default for ScheduleRecommendation {
+    fn default() -> Self {
+        Self {
+            concurrency: 4,
+            fragment_size: 4 * 1024 * 1024, // 4MB
+            confidence: 0.0,
+        }
+    }
+}
+
+/// 下载调度器 trait:提供智能调度决策
+///
+/// 调度器负责:
+/// - 基于带宽预测推荐并发度
+/// - 根据网络状况动态调整分片大小
+/// - 提供调度建议的置信度评估
+pub trait DownloadScheduler: Send + Sync {
+    /// 记录带宽观测值
+    fn observe_bandwidth(&self, bytes_per_sec: u64);
+
+    /// 获取调度建议
+    ///
+    /// 根据当前带宽预测、文件大小和配置约束,返回最优的并发度和分片大小建议。
+    fn recommend(&self, file_size: u64, max_concurrency: u32) -> ScheduleRecommendation;
+
+    /// 获取当前带宽预测(字节/秒)
+    fn predicted_bandwidth(&self) -> u64;
+}
