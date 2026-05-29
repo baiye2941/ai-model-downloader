@@ -71,7 +71,7 @@ impl DownloadScheduler for AdaptiveDownloadScheduler {
         // 经验公式:并发度 = min(带宽 / 单分片带宽需求, 文件分片数, 最大并发)
         let suggested_concurrency = if predicted_bw > 0.0 && suggested_frag_size > 0 {
             // 估算可同时下载的分片数
-            let fragments_for_file = (file_size + suggested_frag_size - 1) / suggested_frag_size;
+            let fragments_for_file = file_size.div_ceil(suggested_frag_size);
             let bandwidth_based =
                 (predicted_bw / (suggested_frag_size as f64 / target_download_secs)) as u32;
             bandwidth_based

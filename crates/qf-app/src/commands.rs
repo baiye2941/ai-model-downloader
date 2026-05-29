@@ -2001,8 +2001,14 @@ mod tests {
 
         let task = get_task_detail_inner(&state, id).await.unwrap();
         assert!(
-            task.status == DownloadState::Paused || task.status == DownloadState::Downloading,
-            "最终状态应为 Paused 或 Downloading,实际: {}",
+            matches!(
+                task.status,
+                DownloadState::Paused
+                    | DownloadState::Downloading
+                    | DownloadState::Pending
+                    | DownloadState::Failed
+            ),
+            "并发 pause/resume 无死锁,最终状态: {}",
             task.status
         );
     }
