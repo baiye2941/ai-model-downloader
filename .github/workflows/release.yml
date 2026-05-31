@@ -20,7 +20,7 @@ jobs:
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: 安装系统依赖(Ubuntu)
         if: runner.os == 'Linux'
